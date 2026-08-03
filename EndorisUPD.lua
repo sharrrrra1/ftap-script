@@ -15994,208 +15994,180 @@ do
     end)()
 
 -- ============================================================
--- INFINITY LINE | Бесконечная линия
+-- INFINITY LINE v2 | Бесконечная линия (FIXED)
 -- ============================================================
 
--- Добавляем настройки в таблицу Settings
 Settings.Misc.infinityLine = false
 Settings.Misc.infinityLineSpeed = 50
 
--- Состояние для Infinity Line
 State.infinityLineTask = nil
 State.infinityLineActive = false
+State.infinityLineCleanup = nil
 
--- Секция в MainTab для Infinity Line
+-- Поиск реально захваченного объекта (НИКОГДА не свой персонаж)
+local function infinityGetGrabbedPart()
+    local grabParts = Workspace:FindFirstChild("GrabParts")
+    if not grabParts then return nil end
+    local myChar = LocalPlayer.Character
+    for _, gp in ipairs(grabParts:GetChildren()) do
+        if gp.Name == "GrabPart" then
+            local weld = gp:FindFirstChildOfClass("WeldConstraint")
+                or gp:FindFirstChildOfClass("Weld")
+                or gp:FindFirstChildOfClass("ManualWeld")
+            if weld then
+                local target = weld.Part1
+                if (not target or target == gp) then target = weld.Part0 end
+                -- Защита: не трогаем собственные части игрока
+                if target and target ~= gp and (not myChar or not target:IsDescendantOf(myChar)) then
+                    return target
+                end
+            end
+        end
+    end
+    return nil
+end
+
 local mainInfinitySec = MainTab:Section({Text = "Infinity Line"})
 
--- Toggle для включения/выключения
 mainInfinitySec:Toggle({Text = "Infinity Line", Flag = "InfinityLineToggle", Default = false, Callback = function(v)
     Settings.Misc.infinityLine = v
 
     if v then
         State.infinityLineActive = true
 
-        -- Запускаем основной цикл в отдельном потоке
         State.infinityLineTask = task.spawn(function()
-            local GE = ReplicatedStorage:WaitForChild("GrabEvents")
-            local createGL = GE:WaitForChild("CreateGrabLine")
-            local destroyGL = GE:WaitForChild("DestroyGrabLine")
-            local setOwner = GE:WaitForChild("SetNetworkOwner")
+            local createGL = grabEventsFolder:WaitForChild("CreateGrabLine")
 
-            local lineLength = 0
-            local lastFire = 0
+            -- === ЛОКАЛЬНАЯ визуальная линия (не реплицируется на сервер) ===
+            local startPart = Instance.new("Part")
+            startPart.Name = "InfLineStart"
+            startPart.Size = Vector3.new(0.1, 0.1, 0.1)
+            startPart.Anchored = true
+            startPart.CanCollide = false
+            startPart.CanTouch = false
+            startPart.CanQuery = false
+            startPart.Transparency = 1
+            startPart.Massless = true
+            startPart.Parent = Workspace
+
+            local endPart = Instance.new("Part")
+            endPart.Name = "InfLineEnd"
+            endPart.Size = Vector3.new(0.1, 0.1, 0.1)
+            endPart.Anchored = true
+            endPart.CanCollide = false
+            endPart.CanTouch = false
+            endPart.CanQuery = false
+            endPart.Transparency = 1
+            endPart.Massless = true
+            endPart.Parent = Workspace
+
+            local a0 = Instance.new("Attachment", startPart)
+            local a1 = Instance.new("Attachment", endPart)
+
+            local beam = Instance.new("Beam")
+            beam.Attachment0 = a0
+            beam.Attachment1 = a1
+            beam.Width0 = 0.18
+            beam.Width1 = 0.18
+            beam.Color = ColorSequence.new(Color3.fromRGB(255, 255, 255))
+            beam.LightEmission = 1
+            beam.FaceCamera = false
+            beam.Parent = startPart
+
+            -- Пытаемся один раз скопировать текстуру у игровой линии захвата
+            local texCopied = false
+
+            -- === Функция полной очистки ===
+            State.infinityLineCleanup = function()
+                State.infinityLineActive = false
+                -- Требование 8: удаляем линию через DestroyGrabLine
+                pcall(function()
+                    local grabbed = infinityGetGrabbedPart()
+                    if grabbed then destroyGrabLineEvent:FireServer(grabbed) end
+                end)
+                pcall(function() beam:Destroy() end)
+                pcall(function() startPart:Destroy() end)
+                pcall(function() endPart:Destroy() end)
+                State.infinityLineCleanup = nil
+            end
+
+            local lineLength = 4
+            local maxLength = 250
+            local frame = 0
 
             while State.infinityLineActive and Settings.Misc.infinityLine do
-                local char = LocalPlayer.Character
-                if not char then
-                    task.wait(0.3)
-                    continue
-                end
+                local myChar = LocalPlayer.Character
+                local hrp = myChar and myChar:FindFirstChild("HumanoidRootPart")
 
-                local hrp = char:FindFirstChild("HumanoidRootPart")
-                if not hrp then
-                    task.wait(0.3)
-                    continue
-                end
+                if hrp then
+                    local grabbed = infinityGetGrabbedPart()
+                    -- Источник линии: захваченный объект, иначе игрок (только визуально!)
+                    local source = grabbed or hrp
 
-                -- Определяем источник линии: захваченный объект или игрок
-                local sourcePart = nil
-                local grabParts = Workspace:FindFirstChild("GrabParts")
-                if grabParts then
-                    for _, gp in ipairs(grabParts:GetChildren()) do
-                        if gp.Name == "GrabPart" then
-                            local weld = gp:FindFirstChildOfClass("WeldConstraint")
-                                or gp:FindFirstChildOfClass("Weld")
-                                or gp:FindFirstChildOfClass("ManualWeld")
-                            if weld then
-                                local p1 = weld.Part1
-                                if p1 and p1 ~= gp then
-                                    sourcePart = p1
-                                    break
-                                end
-                                local p0 = weld.Part0
-                                if p0 and p0 ~= gp then
-                                    sourcePart = p0
-                                    break
-                                end
+                    local cam = Workspace.CurrentCamera
+                    local look = (cam and cam.CFrame.LookVector) or hrp.CFrame.LookVector
+
+                    -- Удлинение линии со скоростью скролла
+                    local speed = Settings.Misc.infinityLineSpeed
+                    lineLength = lineLength + speed * 0.03
+                    if lineLength > maxLength then lineLength = 4 end -- цикл "бесконечности"
+
+                    local startPos = source.Position
+                    startPart.CFrame = CFrame.new(startPos)
+                    endPart.CFrame = CFrame.new(startPos + look * lineLength)
+
+                    -- Скролл текстуры, если удалось скопировать
+                    if not texCopied and grabbed then
+                        pcall(function()
+                            local gp = Workspace:FindFirstChild("GrabParts")
+                            local gameBeam = gp and gp:FindFirstChildWhichIsA("Beam", true)
+                            if gameBeam and gameBeam.Texture ~= "" then
+                                beam.Texture = gameBeam.Texture
+                                beam.Color = gameBeam.Color
+                                texCopied = true
                             end
+                        end)
+                    end
+                    if beam.Texture ~= "" then
+                        beam.TextureOffset = beam.TextureOffset - speed * 0.002
+                    end
+
+                    -- === СЕТЕВАЯ часть: ТОЛЬКО по захваченному объекту,
+                    -- безопасным паттерном (конец = позиция объекта), как во всём скрипте
+                    if grabbed then
+                        if frame % 3 == 0 then
+                            setNetworkOwnerEvent:FireServer(grabbed, grabbed.CFrame)
+                        elseif frame % 3 == 1 then
+                            createGL:FireServer(grabbed, Vector3.zero, grabbed.Position, false)
                         end
                     end
-                end
-
-                -- Если ничего не захвачено — используем HumanoidRootPart игрока
-                if not sourcePart then
-                    sourcePart = hrp
-                end
-
-                -- Вычисляем направление линии (вперёд от камеры)
-                local cam = Workspace.CurrentCamera
-                local lookVec = cam and cam.CFrame.LookVector or hrp.CFrame.LookVector
-
-                -- Увеличиваем длину линии в зависимости от скорости
-                local speed = Settings.Misc.infinityLineSpeed
-                lineLength = lineLength + speed * 0.05
-
-                -- Позиция конца линии
-                local endPos = sourcePart.Position + lookVec * lineLength
-
-                -- Отправляем CreateGrabLine для визуального эффекта удлинения
-                local now = tick()
-                if now - lastFire >= 0.03 then
-                    lastFire = now
-                    pcall(function()
-                        createGL:FireServer(sourcePart, Vector3.zero, endPos, false)
-                    end)
-                end
-
-                -- Периодически обновляем SetNetworkOwner для удержания контроля
-                if math.floor(lineLength) % 100 < 2 then
-                    pcall(function()
-                        setOwner:FireServer(sourcePart, sourcePart.CFrame)
-                    end)
+                    frame = frame + 1
                 end
 
                 RunService.Heartbeat:Wait()
             end
 
-            -- При выключении удаляем линию
-            pcall(function()
-                local char = LocalPlayer.Character
-                if char then
-                    local hrp = char:FindFirstChild("HumanoidRootPart")
-                    if hrp then
-                        destroyGL:FireServer(hrp)
-                    end
-                end
-                -- Также удаляем линию с захваченного объекта если есть
-                local grabParts = Workspace:FindFirstChild("GrabParts")
-                if grabParts then
-                    for _, gp in ipairs(grabParts:GetChildren()) do
-                        if gp.Name == "GrabPart" then
-                            local weld = gp:FindFirstChildOfClass("WeldConstraint")
-                                or gp:FindFirstChildOfClass("Weld")
-                            if weld then
-                                local target = weld.Part1 or weld.Part0
-                                if target and target ~= gp then
-                                    pcall(function() destroyGL:FireServer(target) end)
-                                end
-                            end
-                        end
-                    end
-                end
-            end)
-
-            State.infinityLineActive = false
+            -- Корректная остановка потока
+            if State.infinityLineCleanup then State.infinityLineCleanup() end
         end)
     else
-        -- Останавливаем цикл
+        -- Выключение: останавливаем поток и чистим линию
         State.infinityLineActive = false
-
         if State.infinityLineTask then
-            task.cancel(State.infinityLineTask)
+            pcall(function() task.cancel(State.infinityLineTask) end)
             State.infinityLineTask = nil
         end
-
-        -- Удаляем линию через DestroyGrabLine
-        pcall(function()
-            local GE = ReplicatedStorage:FindFirstChild("GrabEvents")
-            if GE then
-                local destroyGL = GE:FindFirstChild("DestroyGrabLine")
-                if destroyGL then
-                    local char = LocalPlayer.Character
-                    if char then
-                        local hrp = char:FindFirstChild("HumanoidRootPart")
-                        if hrp then
-                            destroyGL:FireServer(hrp)
-                        end
-                    end
-                end
-            end
-        end)
+        if State.infinityLineCleanup then State.infinityLineCleanup() end
     end
 end})
 
--- Slider для регулировки скорости скролла (удлинения)
-mainInfinitySec:Slider({Text = "Line Speed", Flag = "InfinityLineSpeed", Minimum = 10, Maximum = 300, Default = 50, ValueName = "studs/s", Callback = function(value)
+-- Slider скорости скролла (удлинения)
+mainInfinitySec:Slider({Text = "Line Speed", Flag = "InfinityLineSpeed", Minimum = 10, Maximum = 500, Default = 50, ValueName = "studs/s", Callback = function(value)
     Settings.Misc.infinityLineSpeed = value
 end})
 
--- Кнопка для мгновенного сброса линии
-mainInfinitySec:Button({Text = "Reset Line", Callback = function()
-    pcall(function()
-        local GE = ReplicatedStorage:FindFirstChild("GrabEvents")
-        if not GE then return end
-        local destroyGL = GE:FindFirstChild("DestroyGrabLine")
-        if not destroyGL then return end
-
-        local char = LocalPlayer.Character
-        if char then
-            local hrp = char:FindFirstChild("HumanoidRootPart")
-            if hrp then
-                destroyGL:FireServer(hrp)
-            end
-        end
-
-        local grabParts = Workspace:FindFirstChild("GrabParts")
-        if grabParts then
-            for _, gp in ipairs(grabParts:GetChildren()) do
-                if gp.Name == "GrabPart" then
-                    local weld = gp:FindFirstChildOfClass("WeldConstraint")
-                        or gp:FindFirstChildOfClass("Weld")
-                    if weld then
-                        local target = weld.Part1 or weld.Part0
-                        if target and target ~= gp then
-                            pcall(function() destroyGL:FireServer(target) end)
-                        end
-                    end
-                end
-            end
-        end
-    end)
-end})
-
 -- ============================================================
--- КОНЕЦ БЛОКА INFINITY LINE
+-- КОНЕЦ БЛОКА INFINITY LINE v2
 -- ============================================================
 
 warn("EndorisFTAP Reborn loaded successfully!")
