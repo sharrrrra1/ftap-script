@@ -15994,7 +15994,7 @@ do
     end)()
 
 -- ============================================================
--- INFINITY LINE v2 | Бесконечная линия (FIXED)
+-- INFINITY LINE v3 | ВИДИМАЯ ЛИНИЯ
 -- ============================================================
 
 Settings.Misc.infinityLine = false
@@ -16004,7 +16004,7 @@ State.infinityLineTask = nil
 State.infinityLineActive = false
 State.infinityLineCleanup = nil
 
--- Поиск реально захваченного объекта (НИКОГДА не свой персонаж)
+-- Поиск захваченного объекта (НИКОГДА не свой персонаж)
 local function infinityGetGrabbedPart()
     local grabParts = Workspace:FindFirstChild("GrabParts")
     if not grabParts then return nil end
@@ -16017,7 +16017,6 @@ local function infinityGetGrabbedPart()
             if weld then
                 local target = weld.Part1
                 if (not target or target == gp) then target = weld.Part0 end
-                -- Защита: не трогаем собственные части игрока
                 if target and target ~= gp and (not myChar or not target:IsDescendantOf(myChar)) then
                     return target
                 end
@@ -16038,7 +16037,7 @@ mainInfinitySec:Toggle({Text = "Infinity Line", Flag = "InfinityLineToggle", Def
         State.infinityLineTask = task.spawn(function()
             local createGL = grabEventsFolder:WaitForChild("CreateGrabLine")
 
-            -- === ЛОКАЛЬНАЯ визуальная линия (не реплицируется на сервер) ===
+            -- === ЛОКАЛЬНАЯ визуальная линия (сервер её не видит) ===
             local startPart = Instance.new("Part")
             startPart.Name = "InfLineStart"
             startPart.Size = Vector3.new(0.1, 0.1, 0.1)
@@ -16067,20 +16066,20 @@ mainInfinitySec:Toggle({Text = "Infinity Line", Flag = "InfinityLineToggle", Def
             local beam = Instance.new("Beam")
             beam.Attachment0 = a0
             beam.Attachment1 = a1
-            beam.Width0 = 0.18
-            beam.Width1 = 0.18
-            beam.Color = ColorSequence.new(Color3.fromRGB(255, 255, 255))
+            beam.Width0 = 0.6          -- достаточно толстая, чтобы видеть
+            beam.Width1 = 0.6
+            beam.FaceCamera = true     -- ГЛАВНЫЙ ФИКС: лента всегда повёрнута к камере
+            beam.Color = ColorSequence.new(Color3.fromRGB(0, 255, 255))
             beam.LightEmission = 1
-            beam.FaceCamera = false
+            beam.Transparency = NumberSequence.new(0)
             beam.Parent = startPart
 
-            -- Пытаемся один раз скопировать текстуру у игровой линии захвата
-            local texCopied = false
+            warn("[InfinityLine] линия создана, поток работает")
 
-            -- === Функция полной очистки ===
+            -- === Очистка при выключении ===
             State.infinityLineCleanup = function()
                 State.infinityLineActive = false
-                -- Требование 8: удаляем линию через DestroyGrabLine
+                -- Удаляем линию через DestroyGrabLine
                 pcall(function()
                     local grabbed = infinityGetGrabbedPart()
                     if grabbed then destroyGrabLineEvent:FireServer(grabbed) end
@@ -16101,7 +16100,7 @@ mainInfinitySec:Toggle({Text = "Infinity Line", Flag = "InfinityLineToggle", Def
 
                 if hrp then
                     local grabbed = infinityGetGrabbedPart()
-                    -- Источник линии: захваченный объект, иначе игрок (только визуально!)
+                    -- Источник: захваченный объект, иначе игрок (только визуально)
                     local source = grabbed or hrp
 
                     local cam = Workspace.CurrentCamera
@@ -16110,30 +16109,13 @@ mainInfinitySec:Toggle({Text = "Infinity Line", Flag = "InfinityLineToggle", Def
                     -- Удлинение линии со скоростью скролла
                     local speed = Settings.Misc.infinityLineSpeed
                     lineLength = lineLength + speed * 0.03
-                    if lineLength > maxLength then lineLength = 4 end -- цикл "бесконечности"
+                    if lineLength > maxLength then lineLength = 4 end
 
                     local startPos = source.Position
                     startPart.CFrame = CFrame.new(startPos)
                     endPart.CFrame = CFrame.new(startPos + look * lineLength)
 
-                    -- Скролл текстуры, если удалось скопировать
-                    if not texCopied and grabbed then
-                        pcall(function()
-                            local gp = Workspace:FindFirstChild("GrabParts")
-                            local gameBeam = gp and gp:FindFirstChildWhichIsA("Beam", true)
-                            if gameBeam and gameBeam.Texture ~= "" then
-                                beam.Texture = gameBeam.Texture
-                                beam.Color = gameBeam.Color
-                                texCopied = true
-                            end
-                        end)
-                    end
-                    if beam.Texture ~= "" then
-                        beam.TextureOffset = beam.TextureOffset - speed * 0.002
-                    end
-
-                    -- === СЕТЕВАЯ часть: ТОЛЬКО по захваченному объекту,
-                    -- безопасным паттерном (конец = позиция объекта), как во всём скрипте
+                    -- Сетевая часть ТОЛЬКО по захваченному объекту (безопасный паттерн)
                     if grabbed then
                         if frame % 3 == 0 then
                             setNetworkOwnerEvent:FireServer(grabbed, grabbed.CFrame)
@@ -16147,11 +16129,10 @@ mainInfinitySec:Toggle({Text = "Infinity Line", Flag = "InfinityLineToggle", Def
                 RunService.Heartbeat:Wait()
             end
 
-            -- Корректная остановка потока
             if State.infinityLineCleanup then State.infinityLineCleanup() end
         end)
     else
-        -- Выключение: останавливаем поток и чистим линию
+        -- Выключение: гасим поток и чистим линию
         State.infinityLineActive = false
         if State.infinityLineTask then
             pcall(function() task.cancel(State.infinityLineTask) end)
@@ -16167,7 +16148,7 @@ mainInfinitySec:Slider({Text = "Line Speed", Flag = "InfinityLineSpeed", Minimum
 end})
 
 -- ============================================================
--- КОНЕЦ БЛОКА INFINITY LINE v2
+-- КОНЕЦ БЛОКА INFINITY LINE v3
 -- ============================================================
 
 warn("EndorisFTAP Reborn loaded successfully!")
