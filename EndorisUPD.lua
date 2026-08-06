@@ -15994,16 +15994,15 @@ do
     end)()
 
 -- ============================================================
--- INFINITY LINE v7 | скорость скролла < 1 и 0 (ванилла)
+-- INFINITY LINE v8 | ультра-медленные скорости у нуля
 -- ============================================================
--- ЧТО ИЗМЕНИЛОСЬ ПО СРАВНЕНИЮ С v6:
---  * Скорость скролла/клавиш теперь можно ставить МЕНЬШЕ 1 и В 0.
---    Слайдер в шагах x0.1: 50 = 5.0, 5 = 0.5, 0 = 0.
---  * Скорость 0 = "как будто скрипта нет": колесо и клавиши вообще
---    не трогают линию, захват ведёт себя как ванильный.
---  * Всё из v6 сохранено: сглаживание направления (анти-тряска),
---    одна мировая точка для обеих рук, BindToRenderStep после
---    камеры, мягкий буст констрейнтов с восстановлением.
+-- ЧТО ИЗМЕНИЛОСЬ ПО СРАВНЕНИЮ С v7:
+--  * Слайдер скорости теперь с шагом 0.01 (x0.01), максимум 10.
+--  * Значения МЕНЬШЕ 1 проходят через квадратичную кривую:
+--    0.5 -> 0.25, 0.1 -> 0.01, 0.01 -> 0.0001 (ещё медленнее).
+--  * 0 по-прежнему = "скрипта нет" (колесо и клавиши не трогают линию).
+--  * Всё остальное из v6/v7 сохранено (анти-тряска, одна точка для
+--    обеих рук, BindToRenderStep после камеры, буст с восстановлением).
 -- Ремуты НЕ стреляют => античит не задет.
 -- ============================================================
 
@@ -16026,6 +16025,14 @@ local IL_MIN_PULL = -10
 
 local function ilClampReach(v)
     return math.clamp(v, IL_MIN_PULL, Settings.Grab.InfinityLineMax)
+end
+
+-- НОВОЕ (v8): квадратичное замедление значений ниже 1.
+-- 0 остаётся 0 (ванилла), 0.1 становится 0.01 и т.д.
+local function ilEaseSpeed(s)
+    if s <= 0 then return 0 end
+    if s < 1 then return s * s end
+    return s
 end
 
 -- Сканирование рук: активная рука = та, чей DragAttach используется
@@ -16141,7 +16148,8 @@ local function ilStep(dt)
     if not model or not IL.primary then return end
 
     -- Удержание клавиш Extend/Retract (при скорости 0 не работают => ванилла)
-    local speed = Settings.Grab.InfinityLineScrollSpeed
+    -- v8: скорость проходит через квадратичное замедление
+    local speed = ilEaseSpeed(Settings.Grab.InfinityLineScrollSpeed)
     if speed > 0 then
         local holdRate = speed * 12 * dt
         if IL.holdExt then IL.offset = IL.offset + holdRate end
@@ -16192,7 +16200,7 @@ local function ilStart()
     IL.scrollConn = UserInputService.InputChanged:Connect(function(input)
         if not Settings.Grab.InfinityLine then return end
         if input.UserInputType ~= Enum.UserInputType.MouseWheel then return end
-        local speed = Settings.Grab.InfinityLineScrollSpeed
+        local speed = ilEaseSpeed(Settings.Grab.InfinityLineScrollSpeed)
         if speed <= 0 then return end -- 0 = "скрипта нет", колесо не трогает линию
         if not Workspace:FindFirstChild("GrabParts") then return end
         IL.offset = IL.offset + input.Position.Z * speed
@@ -16230,10 +16238,10 @@ infLineSec:Slider({Text = "Max Reach (Cap)", Flag = "InfLineMax", Minimum = 50, 
     IL.offset = ilClampReach(IL.offset)
 end})
 
--- НОВОЕ: скорость в шагах x0.1 => доступны 0 и значения меньше 1.
--- 0 = базовый скролл, как будто скрипта нет.
-infLineSec:Slider({Text = "Scroll Speed (x0.1)", Flag = "InfLineScrollSpeed", Minimum = 0, Maximum = 500, Default = 50, ValueName = "", Callback = function(v)
-    Settings.Grab.InfinityLineScrollSpeed = v / 10
+-- v8: шаг 0.01 (x0.01). 0 = ванилла; значения ниже 1 дополнительно
+-- замедлены квадратичной кривой (0.1 на слайдере => 0.01 реальной скорости).
+infLineSec:Slider({Text = "Scroll Speed (x0.01)", Flag = "InfLineScrollSpeed", Minimum = 0, Maximum = 1000, Default = 500, ValueName = "", Callback = function(v)
+    Settings.Grab.InfinityLineScrollSpeed = v / 100
 end})
 
 infLineSec:Slider({Text = "Smoothness", Flag = "InfLineSmooth", Minimum = 2, Maximum = 30, Default = 14, ValueName = "lerp", Callback = function(v)
@@ -16249,7 +16257,7 @@ infLineSec:Keybind({Text = "Retract (Hold)", Flag = "InfLineRetractKey", Mode = 
 end})
 
 -- ============================================================
--- КОНЕЦ БЛОКА INFINITY LINE v7
+-- КОНЕЦ БЛОКА INFINITY LINE v8
 -- ============================================================
 
 warn("EndorisFTAP Reborn loaded successfully!")
