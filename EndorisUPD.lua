@@ -15994,161 +15994,209 @@ do
     end)()
 
 -- ============================================================
--- INFINITY LINE v3 | ВИДИМАЯ ЛИНИЯ
+-- INFINITY LINE v4 | Reach / Grab-Line Extender (stable rewrite)
+-- ============================================================
+-- ИНТЕГРАЦИЯ: полностью удали старые блоки "Infinity Line" (v1/v2/v3)
+-- и вставь этот блок перед последней строкой warn("...loaded successfully!")
+--
+-- ПРИНЦИП РАБОТЫ (почему это стабильно):
+--  * Не стреляет НИ ОДНИМ ремоутом (CreateGrabLine/SetNetworkOwner/DestroyGrabLine)
+--    => RemoteDispatcher не затрагивается, серверный античит не срабатывает.
+--  * Работает через родной механизм игры: при захвате в Workspace создаётся
+--    модель GrabParts с DragPart/DragPart1, у которых есть Attachment "DragAttach".
+--    Именно к этой точке объект притягивается AlignPosition/AlignOrientation.
+--    Мы просто двигаем эту точку вдоль взгляда камеры — линия и объект
+--    плавно удлиняются, физика захвата и network ownership не ломаются.
+--  * Экспоненциальное сглаживание (frame-rate independent) — без джиттера.
+--  * Мягкий буст констрейнтов с СОХРАНЕНИЕМ оригинальных значений и полным
+--    восстановлением при выключении/смене захвата — без резких флингов.
+--  * СОВЕТ: для больших дистанций включи существующий toggle "Reach Gamepass",
+--    чтобы сервер принимал дальний захват; не включай одновременно с "Inf Zoom"
+--    (обе фичи пишут в DragAttach — код сам пропускает запись, если InfZoom активен).
 -- ============================================================
 
-Settings.Misc.infinityLine = false
-Settings.Misc.infinityLineSpeed = 50
+Settings.Grab.InfinityLine            = false
+Settings.Grab.InfinityLineReach       = 30   -- базовая дистанция (студы)
+Settings.Grab.InfinityLineMax         = 500  -- жёсткий потолок (защита от киков/флингов)
+Settings.Grab.InfinityLineScrollSpeed = 5    -- скорость скролла/кнопки (студы за тик)
+Settings.Grab.InfinityLineSmooth      = 14   -- коэффициент сглаживания (больше = резче)
 
-State.infinityLineTask = nil
-State.infinityLineActive = false
-State.infinityLineCleanup = nil
+State.infLine = State.infLine or {
+    current = 0, offset = 0,
+    holdExt = false, holdRet = false,
+    grabModel = nil, dragEntries = {}, saved = {},
+    loop = nil, scrollConn = nil,
+}
+local IL = State.infLine
 
--- Поиск захваченного объекта (НИКОГДА не свой персонаж)
-local function infinityGetGrabbedPart()
-    local grabParts = Workspace:FindFirstChild("GrabParts")
-    if not grabParts then return nil end
-    local myChar = LocalPlayer.Character
-    for _, gp in ipairs(grabParts:GetChildren()) do
-        if gp.Name == "GrabPart" then
-            local weld = gp:FindFirstChildOfClass("WeldConstraint")
-                or gp:FindFirstChildOfClass("Weld")
-                or gp:FindFirstChildOfClass("ManualWeld")
-            if weld then
-                local target = weld.Part1
-                if (not target or target == gp) then target = weld.Part0 end
-                if target and target ~= gp and (not myChar or not target:IsDescendantOf(myChar)) then
-                    return target
-                end
-            end
-        end
-    end
-    return nil
+-- Кламп дистанции: никогда не уходим в отрицательную длину или за потолок
+local function ilClampReach(v)
+    return math.clamp(v, 0, Settings.Grab.InfinityLineMax)
 end
 
-local mainInfinitySec = MainTab:Section({Text = "Infinity Line"})
-
-mainInfinitySec:Toggle({Text = "Infinity Line", Flag = "InfinityLineToggle", Default = false, Callback = function(v)
-    Settings.Misc.infinityLine = v
-
-    if v then
-        State.infinityLineActive = true
-
-        State.infinityLineTask = task.spawn(function()
-            local createGL = grabEventsFolder:WaitForChild("CreateGrabLine")
-
-            -- === ЛОКАЛЬНАЯ визуальная линия (сервер её не видит) ===
-            local startPart = Instance.new("Part")
-            startPart.Name = "InfLineStart"
-            startPart.Size = Vector3.new(0.1, 0.1, 0.1)
-            startPart.Anchored = true
-            startPart.CanCollide = false
-            startPart.CanTouch = false
-            startPart.CanQuery = false
-            startPart.Transparency = 1
-            startPart.Massless = true
-            startPart.Parent = Workspace
-
-            local endPart = Instance.new("Part")
-            endPart.Name = "InfLineEnd"
-            endPart.Size = Vector3.new(0.1, 0.1, 0.1)
-            endPart.Anchored = true
-            endPart.CanCollide = false
-            endPart.CanTouch = false
-            endPart.CanQuery = false
-            endPart.Transparency = 1
-            endPart.Massless = true
-            endPart.Parent = Workspace
-
-            local a0 = Instance.new("Attachment", startPart)
-            local a1 = Instance.new("Attachment", endPart)
-
-            local beam = Instance.new("Beam")
-            beam.Attachment0 = a0
-            beam.Attachment1 = a1
-            beam.Width0 = 0.6          -- достаточно толстая, чтобы видеть
-            beam.Width1 = 0.6
-            beam.FaceCamera = true     -- ГЛАВНЫЙ ФИКС: лента всегда повёрнута к камере
-            beam.Color = ColorSequence.new(Color3.fromRGB(0, 255, 255))
-            beam.LightEmission = 1
-            beam.Transparency = NumberSequence.new(0)
-            beam.Parent = startPart
-
-            warn("[InfinityLine] линия создана, поток работает")
-
-            -- === Очистка при выключении ===
-            State.infinityLineCleanup = function()
-                State.infinityLineActive = false
-                -- Удаляем линию через DestroyGrabLine
-                pcall(function()
-                    local grabbed = infinityGetGrabbedPart()
-                    if grabbed then destroyGrabLineEvent:FireServer(grabbed) end
-                end)
-                pcall(function() beam:Destroy() end)
-                pcall(function() startPart:Destroy() end)
-                pcall(function() endPart:Destroy() end)
-                State.infinityLineCleanup = nil
-            end
-
-            local lineLength = 4
-            local maxLength = 250
-            local frame = 0
-
-            while State.infinityLineActive and Settings.Misc.infinityLine do
-                local myChar = LocalPlayer.Character
-                local hrp = myChar and myChar:FindFirstChild("HumanoidRootPart")
-
-                if hrp then
-                    local grabbed = infinityGetGrabbedPart()
-                    -- Источник: захваченный объект, иначе игрок (только визуально)
-                    local source = grabbed or hrp
-
-                    local cam = Workspace.CurrentCamera
-                    local look = (cam and cam.CFrame.LookVector) or hrp.CFrame.LookVector
-
-                    -- Удлинение линии со скоростью скролла
-                    local speed = Settings.Misc.infinityLineSpeed
-                    lineLength = lineLength + speed * 0.03
-                    if lineLength > maxLength then lineLength = 4 end
-
-                    local startPos = source.Position
-                    startPart.CFrame = CFrame.new(startPos)
-                    endPart.CFrame = CFrame.new(startPos + look * lineLength)
-
-                    -- Сетевая часть ТОЛЬКО по захваченному объекту (безопасный паттерн)
-                    if grabbed then
-                        if frame % 3 == 0 then
-                            setNetworkOwnerEvent:FireServer(grabbed, grabbed.CFrame)
-                        elseif frame % 3 == 1 then
-                            createGL:FireServer(grabbed, Vector3.zero, grabbed.Position, false)
-                        end
-                    end
-                    frame = frame + 1
+-- Поиск DragPart/DragPart1 и их аттачментов DragAttach*
+local function ilScanDragParts(model)
+    local entries = {}
+    if not model then return entries end
+    for _, dpName in ipairs({"DragPart", "DragPart1"}) do
+        local dp = model:FindFirstChild(dpName)
+        if dp then
+            for _, ch in ipairs(dp:GetChildren()) do
+                if ch:IsA("Attachment") and ch.Name:sub(1, 10) == "DragAttach" then
+                    table.insert(entries, { part = dp, attach = ch })
                 end
-
-                RunService.Heartbeat:Wait()
             end
-
-            if State.infinityLineCleanup then State.infinityLineCleanup() end
-        end)
-    else
-        -- Выключение: гасим поток и чистим линию
-        State.infinityLineActive = false
-        if State.infinityLineTask then
-            pcall(function() task.cancel(State.infinityLineTask) end)
-            State.infinityLineTask = nil
         end
-        if State.infinityLineCleanup then State.infinityLineCleanup() end
     end
+    return entries
+end
+
+-- Мягкий буст констрейнтов, чтобы объект оставался отзывчивым на большой
+-- дистанции. БЕЗ math.huge — только умеренное ускорение отклика.
+local function ilBoost(model)
+    if not model then return end
+    for _, dpName in ipairs({"DragPart", "DragPart1"}) do
+        local dp = model:FindFirstChild(dpName)
+        if dp then
+            local ap = dp:FindFirstChildOfClass("AlignPosition")
+            if ap and not IL.saved[ap] then
+                IL.saved[ap] = { Responsiveness = ap.Responsiveness, MaxVelocity = ap.MaxVelocity }
+                ap.Responsiveness = math.min(ap.Responsiveness * 1.5, 120)
+                ap.MaxVelocity    = math.max(ap.MaxVelocity, 250)
+            end
+            local ao = dp:FindFirstChildOfClass("AlignOrientation")
+            if ao and not IL.saved[ao] then
+                IL.saved[ao] = { Responsiveness = ao.Responsiveness, MaxAngularVelocity = ao.MaxAngularVelocity }
+                ao.Responsiveness   = math.min(ao.Responsiveness * 1.5, 120)
+                ao.MaxAngularVelocity = math.max(ao.MaxAngularVelocity, 60)
+            end
+        end
+    end
+end
+
+-- Полное восстановление оригинальных значений констрейнтов
+local function ilRestore()
+    for obj, orig in pairs(IL.saved) do
+        if obj and obj.Parent then
+            pcall(function()
+                if orig.Responsiveness     then obj.Responsiveness     = orig.Responsiveness end
+                if orig.MaxVelocity        then obj.MaxVelocity        = orig.MaxVelocity end
+                if orig.MaxAngularVelocity then obj.MaxAngularVelocity = orig.MaxAngularVelocity end
+            end)
+        end
+    end
+    IL.saved = {}
+end
+
+-- Основной цикл: вызывается каждый Heartbeat, пока фича включена
+local function ilOnHeartbeat(dt)
+    if not Settings.Grab.InfinityLine then return end
+
+    local model = Workspace:FindFirstChild("GrabParts")
+
+    -- Захват появился/исчез/сменился -> сброс и перекэш (защита от гонок)
+    if model ~= IL.grabModel then
+        ilRestore()
+        IL.grabModel   = model
+        IL.offset      = 0   -- новый захват стартует с базовой дистанции
+        IL.current     = 0   -- плавный ease-in вместо рывка (анти-флинг)
+        IL.dragEntries = ilScanDragParts(model)
+        if model then
+            if #IL.dragEntries == 0 then
+                -- DragPart может появиться на 1-2 кадра позже
+                task.defer(function()
+                    if IL.grabModel == model then
+                        IL.dragEntries = ilScanDragParts(model)
+                        ilBoost(model)
+                    end
+                end)
+            else
+                ilBoost(model)
+            end
+        end
+    end
+
+    if not model or #IL.dragEntries == 0 then return end
+
+    --- Удержание клавиш (Extend/Retract): скорость = ScrollSpeed * 12 студ/сек
+    local holdRate = Settings.Grab.InfinityLineScrollSpeed * 12 * dt
+    if IL.holdExt then IL.offset = IL.offset + holdRate end
+    if IL.holdRet then IL.offset = IL.offset - holdRate end
+    IL.offset = math.clamp(IL.offset, -Settings.Grab.InfinityLineReach, Settings.Grab.InfinityLineMax)
+
+    --- Целевая дистанция + экспоненциальное сглаживание (не зависит от FPS)
+    local target = ilClampReach(Settings.Grab.InfinityLineReach + IL.offset)
+    local alpha  = 1 - math.exp(-Settings.Grab.InfinityLineSmooth * dt)
+    IL.current   = IL.current + (target - IL.current) * alpha
+    if math.abs(IL.current - target) < 0.01 then IL.current = target end
+
+    -- Не конфликтуем с существующим Inf Zoom (он тоже владеет DragAttach)
+    if Settings.Grab.InfZoom then return end
+
+    local look = Workspace.CurrentCamera.CFrame.LookVector
+
+    -- Двигаем точку притягивания ВПЕРЕД по взгляду камеры.
+    -- Пересчёт в object-space через PointToObjectSpace — корректная
+    -- векторная математика при любом повороте DragPart (без джиттера).
+    for _, e in ipairs(IL.dragEntries) do
+        if e.part.Parent and e.attach.Parent then
+            local worldPoint = e.part.Position + look * IL.current
+            e.attach.Position = e.part.CFrame:PointToObjectSpace(worldPoint)
+        end
+    end
+end
+
+local function ilStart()
+    if IL.loop then return end
+    IL.loop = RunService.Heartbeat:Connect(ilOnHeartbeat)
+    -- Скролл колеса мыши работает ТОЛЬКО во время захвата (иначе не трогаем)
+    IL.scrollConn = UserInputService.InputChanged:Connect(function(input)
+        if not Settings.Grab.InfinityLine then return end
+        if input.UserInputType ~= Enum.UserInputType.MouseWheel then return end
+        if not Workspace:FindFirstChild("GrabParts") then return end
+        IL.offset = IL.offset + input.Position.Z * Settings.Grab.InfinityLineScrollSpeed
+    end)
+end
+
+local function ilStop()
+    if IL.loop then IL.loop:Disconnect() IL.loop = nil end
+    if IL.scrollConn then IL.scrollConn:Disconnect() IL.scrollConn = nil end
+    ilRestore()
+    IL.grabModel, IL.dragEntries = nil, {}
+    IL.offset, IL.current = 0, 0
+    IL.holdExt, IL.holdRet = false, false
+end
+
+-- ============================ UI ============================
+local infLineSec = GrabTab:Section({Text = "Infinity Line"})
+
+infLineSec:Toggle({Text = "Infinity Line", Flag = "InfLineToggle", Default = false, Callback = function(v)
+    Settings.Grab.InfinityLine = v
+    if v then ilStart() else ilStop() end
 end})
 
--- Slider скорости скролла (удлинения)
-mainInfinitySec:Slider({Text = "Line Speed", Flag = "InfinityLineSpeed", Minimum = 10, Maximum = 500, Default = 50, ValueName = "studs/s", Callback = function(value)
-    Settings.Misc.infinityLineSpeed = value
+infLineSec:Slider({Text = "Reach Distance", Flag = "InfLineReach", Minimum = 10, Maximum = 500, Default = 30, ValueName = "studs", Callback = function(v)
+    Settings.Grab.InfinityLineReach = v
+end})
+
+infLineSec:Slider({Text = "Scroll / Key Speed", Flag = "InfLineScrollSpeed", Minimum = 1, Maximum = 50, Default = 5, ValueName = "studs", Callback = function(v)
+    Settings.Grab.InfinityLineScrollSpeed = v
+end})
+
+infLineSec:Slider({Text = "Smoothness", Flag = "InfLineSmooth", Minimum = 2, Maximum = 30, Default = 14, ValueName = "lerp", Callback = function(v)
+    Settings.Grab.InfinityLineSmooth = v
+end})
+
+infLineSec:Keybind({Text = "Extend (Hold)", Flag = "InfLineExtendKey", Mode = "Hold", Callback = function(held)
+    IL.holdExt = held
+end})
+
+infLineSec:Keybind({Text = "Retract (Hold)", Flag = "InfLineRetractKey", Mode = "Hold", Callback = function(held)
+    IL.holdRet = held
 end})
 
 -- ============================================================
--- КОНЕЦ БЛОКА INFINITY LINE v3
+-- КОНЕЦ БЛОКА INFINITY LINE v4
 -- ============================================================
 
 warn("EndorisFTAP Reborn loaded successfully!")
