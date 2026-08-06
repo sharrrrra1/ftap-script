@@ -15994,32 +15994,18 @@ do
     end)()
 
 -- ============================================================
--- INFINITY LINE v4 | Reach / Grab-Line Extender (stable rewrite)
--- ============================================================
--- ИНТЕГРАЦИЯ: полностью удали старые блоки "Infinity Line" (v1/v2/v3)
--- и вставь этот блок перед последней строкой warn("...loaded successfully!")
---
--- ПРИНЦИП РАБОТЫ (почему это стабильно):
---  * Не стреляет НИ ОДНИМ ремоутом (CreateGrabLine/SetNetworkOwner/DestroyGrabLine)
---    => RemoteDispatcher не затрагивается, серверный античит не срабатывает.
---  * Работает через родной механизм игры: при захвате в Workspace создаётся
---    модель GrabParts с DragPart/DragPart1, у которых есть Attachment "DragAttach".
---    Именно к этой точке объект притягивается AlignPosition/AlignOrientation.
---    Мы просто двигаем эту точку вдоль взгляда камеры — линия и объект
---    плавно удлиняются, физика захвата и network ownership не ломаются.
---  * Экспоненциальное сглаживание (frame-rate independent) — без джиттера.
---  * Мягкий буст констрейнтов с СОХРАНЕНИЕМ оригинальных значений и полным
---    восстановлением при выключении/смене захвата — без резких флингов.
---  * СОВЕТ: для больших дистанций включи существующий toggle "Reach Gamepass",
---    чтобы сервер принимал дальний захват; не включай одновременно с "Inf Zoom"
---    (обе фичи пишут в DragAttach — код сам пропускает запись, если InfZoom активен).
+-- INFINITY LINE v5 | Reach / Grab-Line Extender
+-- FIX v5: НЕТ авто-удлинения при захвате.
+-- Каждый захват стартует с ОБЫЧНОЙ длины игры (offset = 0).
+-- Удлинение/укорочение — только колесом мыши / кнопками,
+-- в пределах [IL_MIN_PULL .. Max Reach].
+-- Не стреляет ремоутами => античит/RemoteDispatcher не задеты.
 -- ============================================================
 
 Settings.Grab.InfinityLine            = false
-Settings.Grab.InfinityLineReach       = 30   -- базовая дистанция (студы)
-Settings.Grab.InfinityLineMax         = 500  -- жёсткий потолок (защита от киков/флингов)
-Settings.Grab.InfinityLineScrollSpeed = 5    -- скорость скролла/кнопки (студы за тик)
-Settings.Grab.InfinityLineSmooth      = 14   -- коэффициент сглаживания (больше = резче)
+Settings.Grab.InfinityLineMax         = 500  -- потолок удлинения (студы)
+Settings.Grab.InfinityLineScrollSpeed = 5    -- скорость скролла/кнопок
+Settings.Grab.InfinityLineSmooth      = 14   -- сглаживание (больше = резче)
 
 State.infLine = State.infLine or {
     current = 0, offset = 0,
@@ -16029,9 +16015,11 @@ State.infLine = State.infLine or {
 }
 local IL = State.infLine
 
--- Кламп дистанции: никогда не уходим в отрицательную длину или за потолок
+-- Насколько можно притянуть объект БЛИЖЕ обычной длины
+local IL_MIN_PULL = -10
+
 local function ilClampReach(v)
-    return math.clamp(v, 0, Settings.Grab.InfinityLineMax)
+    return math.clamp(v, IL_MIN_PULL, Settings.Grab.InfinityLineMax)
 end
 
 -- Поиск DragPart/DragPart1 и их аттачментов DragAttach*
@@ -16051,8 +16039,7 @@ local function ilScanDragParts(model)
     return entries
 end
 
--- Мягкий буст констрейнтов, чтобы объект оставался отзывчивым на большой
--- дистанции. БЕЗ math.huge — только умеренное ускорение отклика.
+-- Мягкий буст констрейнтов (сохраняем оригиналы для восстановления)
 local function ilBoost(model)
     if not model then return end
     for _, dpName in ipairs({"DragPart", "DragPart1"}) do
@@ -16067,14 +16054,14 @@ local function ilBoost(model)
             local ao = dp:FindFirstChildOfClass("AlignOrientation")
             if ao and not IL.saved[ao] then
                 IL.saved[ao] = { Responsiveness = ao.Responsiveness, MaxAngularVelocity = ao.MaxAngularVelocity }
-                ao.Responsiveness   = math.min(ao.Responsiveness * 1.5, 120)
+                ao.Responsiveness     = math.min(ao.Responsiveness * 1.5, 120)
                 ao.MaxAngularVelocity = math.max(ao.MaxAngularVelocity, 60)
             end
         end
     end
 end
 
--- Полное восстановление оригинальных значений констрейнтов
+-- Полное восстановление оригинальных значений
 local function ilRestore()
     for obj, orig in pairs(IL.saved) do
         if obj and obj.Parent then
@@ -16088,18 +16075,18 @@ local function ilRestore()
     IL.saved = {}
 end
 
--- Основной цикл: вызывается каждый Heartbeat, пока фича включена
+-- Основной цикл (Heartbeat), пока фича включена
 local function ilOnHeartbeat(dt)
     if not Settings.Grab.InfinityLine then return end
 
     local model = Workspace:FindFirstChild("GrabParts")
 
-    -- Захват появился/исчез/сменился -> сброс и перекэш (защита от гонок)
+    -- Захват появился/исчез/сменился -> сброс и перекэш
     if model ~= IL.grabModel then
         ilRestore()
         IL.grabModel   = model
-        IL.offset      = 0   -- новый захват стартует с базовой дистанции
-        IL.current     = 0   -- плавный ease-in вместо рывка (анти-флинг)
+        IL.offset      = 0   -- ГЛАВНЫЙ ФИКС: новый захват = обычная длина
+        IL.current     = 0
         IL.dragEntries = ilScanDragParts(model)
         if model then
             if #IL.dragEntries == 0 then
@@ -16118,26 +16105,24 @@ local function ilOnHeartbeat(dt)
 
     if not model or #IL.dragEntries == 0 then return end
 
-    --- Удержание клавиш (Extend/Retract): скорость = ScrollSpeed * 12 студ/сек
+    -- Удержание клавиш Extend/Retract
     local holdRate = Settings.Grab.InfinityLineScrollSpeed * 12 * dt
     if IL.holdExt then IL.offset = IL.offset + holdRate end
     if IL.holdRet then IL.offset = IL.offset - holdRate end
-    IL.offset = math.clamp(IL.offset, -Settings.Grab.InfinityLineReach, Settings.Grab.InfinityLineMax)
+    IL.offset = ilClampReach(IL.offset)
 
-    --- Целевая дистанция + экспоненциальное сглаживание (не зависит от FPS)
-    local target = ilClampReach(Settings.Grab.InfinityLineReach + IL.offset)
+    -- Цель = ЧИСТЫЙ offset (без базового Reach) => авто-удлинения нет
+    local target = IL.offset
     local alpha  = 1 - math.exp(-Settings.Grab.InfinityLineSmooth * dt)
     IL.current   = IL.current + (target - IL.current) * alpha
     if math.abs(IL.current - target) < 0.01 then IL.current = target end
 
-    -- Не конфликтуем с существующим Inf Zoom (он тоже владеет DragAttach)
+    -- Не конфликтуем с Inf Zoom (он тоже владеет DragAttach)
     if Settings.Grab.InfZoom then return end
 
     local look = Workspace.CurrentCamera.CFrame.LookVector
 
-    -- Двигаем точку притягивания ВПЕРЕД по взгляду камеры.
-    -- Пересчёт в object-space через PointToObjectSpace — корректная
-    -- векторная математика при любом повороте DragPart (без джиттера).
+    -- current == 0 => пишем штатную точку (ничего не меняем визуально)
     for _, e in ipairs(IL.dragEntries) do
         if e.part.Parent and e.attach.Parent then
             local worldPoint = e.part.Position + look * IL.current
@@ -16149,7 +16134,7 @@ end
 local function ilStart()
     if IL.loop then return end
     IL.loop = RunService.Heartbeat:Connect(ilOnHeartbeat)
-    -- Скролл колеса мыши работает ТОЛЬКО во время захвата (иначе не трогаем)
+    -- Скролл работает ТОЛЬКО во время захвата
     IL.scrollConn = UserInputService.InputChanged:Connect(function(input)
         if not Settings.Grab.InfinityLine then return end
         if input.UserInputType ~= Enum.UserInputType.MouseWheel then return end
@@ -16175,8 +16160,10 @@ infLineSec:Toggle({Text = "Infinity Line", Flag = "InfLineToggle", Default = fal
     if v then ilStart() else ilStop() end
 end})
 
-infLineSec:Slider({Text = "Reach Distance", Flag = "InfLineReach", Minimum = 10, Maximum = 500, Default = 30, ValueName = "studs", Callback = function(v)
-    Settings.Grab.InfinityLineReach = v
+-- Теперь это ПОТОЛОК удлинения, а не авто-применяемая база
+infLineSec:Slider({Text = "Max Reach (Cap)", Flag = "InfLineMax", Minimum = 50, Maximum = 1000, Default = 500, ValueName = "studs", Callback = function(v)
+    Settings.Grab.InfinityLineMax = v
+    IL.offset = ilClampReach(IL.offset)
 end})
 
 infLineSec:Slider({Text = "Scroll / Key Speed", Flag = "InfLineScrollSpeed", Minimum = 1, Maximum = 50, Default = 5, ValueName = "studs", Callback = function(v)
@@ -16196,7 +16183,7 @@ infLineSec:Keybind({Text = "Retract (Hold)", Flag = "InfLineRetractKey", Mode = 
 end})
 
 -- ============================================================
--- КОНЕЦ БЛОКА INFINITY LINE v4
+-- КОНЕЦ БЛОКА INFINITY LINE v5
 -- ============================================================
 
 warn("EndorisFTAP Reborn loaded successfully!")
