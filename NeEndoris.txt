@@ -43,14 +43,454 @@ do
     end
 end
 
-local libSource = game:HttpGet("https://raw.githubusercontent.com/marshelx/endoris/refs/heads/main/library.lua")
-local pos = libSource:find("local library")
-if pos then libSource = libSource:sub(1, pos - 1) .. "library" .. libSource:sub(pos + #"local library") end
-local func, err = loadstring(libSource)
-if not func then warn("loadstring: " .. tostring(err)) return end
-local ok, runErr = pcall(func)
-if not ok then warn("runtime: " .. tostring(runErr)) return end
+-- ===================== RAYFIELD UI EDITION =====================
+-- UI заменён со старой Endoris-библиотеки на Rayfield Interface Suite
+-- (ArrayField — поддерживаемый билд Rayfield, оригинальный репозиторий
+-- shlexware/Rayfield удалён с GitHub).
+-- Вся логика скрипта, флаги, конфиги и кейбинды работают как раньше.
+
+local RAYFIELD_SOURCES = {
+    "https://raw.githubusercontent.com/UI-Interface/CustomFIeld/main/RayField.lua",
+    "https://raw.githubusercontent.com/ArowixExploits/RayfieldUILibrary/main/source",
+}
+
+local Rayfield = nil
+for _, srcUrl in ipairs(RAYFIELD_SOURCES) do
+    local ok, result = pcall(function()
+        local source = game:HttpGet(srcUrl)
+        local loader = loadstring(source)
+        if type(loader) ~= "function" then error("loadstring failed") end
+        return loader()
+    end)
+    if ok and type(result) == "table" then
+        Rayfield = result
+        break
+    end
+end
+if not Rayfield then
+    warn("[Rayfield] failed to load UI library")
+    return
+end
+
+local library = {
+    Flags = {},
+    _flagSetters = {},
+    ChangingKeybind = false,
+    ScreenGui = nil,
+    _keybindSync = {},
+    _uid = 0,
+}
+
+-- нулевой ширины пробел: делает имена элементов уникальными для Rayfield,
+-- при этом абсолютно невидим в интерфейсе
+local ZWSP = "\226\128\139"
+
+local function keyNameFromDefault(def)
+    if def == nil then return "" end
+    if typeof(def) == "EnumItem" then
+        if def.EnumType == Enum.KeyCode then
+            if def == Enum.KeyCode.Unknown then return "" end
+            return def.Name
+        elseif def.EnumType == Enum.UserInputType then
+            return def.Name
+        end
+    elseif type(def) == "string" then
+        return def
+    end
+    return ""
+end
+
+local function resolveKey(keyName)
+    if not keyName or keyName == "" then return Enum.KeyCode.Unknown, nil end
+    local ok, code = pcall(function() return Enum.KeyCode[keyName] end)
+    if ok and code and code ~= Enum.KeyCode.Unknown then return code, nil end
+    local ok2, itype = pcall(function() return Enum.UserInputType[keyName] end)
+    if ok2 and itype then return Enum.KeyCode.Unknown, itype end
+    return Enum.KeyCode.Unknown, nil
+end
+
+local function createRF(rfTab, method, settings, sectionParent)
+    if sectionParent ~= nil then settings.SectionParent = sectionParent end
+    local ok, el = pcall(function() return rfTab[method](rfTab, settings) end)
+    if ok and el ~= nil then return el end
+    if not ok and sectionParent ~= nil then
+        settings.SectionParent = nil
+        local ok2, el2 = pcall(function() return rfTab[method](rfTab, settings) end)
+        if ok2 and el2 ~= nil then return el2 end
+    end
+    return nil
+end
+
+-- безопасная проверка "сейчас пользователь меняет клавишу в Rayfield"
+local function isRebindingKey()
+    local ok, tb = pcall(function() return UserInputService:GetFocusedTextBox() end)
+    if ok and tb and tb.Name == "KeybindBox" then return true end
+    return library.ChangingKeybind == true
+end
+
+-- ---------------------- элементы (Endoris-совместимые) ----------------------
+
+local function rfToggle(rfTab, sectionParent, Info)
+    local cb = Info.Callback or function() end
+    local flag = Info.Flag
+    local element = nil
+    local applyProg = nil
+    local settings = {
+        Name = Info.Text or "Toggle",
+        CurrentValue = Info.Default == true,
+        Callback = function(v)
+            if flag ~= nil then library.Flags[flag] = {Value = v, Callback = applyProg} end
+            task.spawn(function() pcall(cb, v) end)
+        end,
+    }
+    element = createRF(rfTab, "CreateToggle", settings, sectionParent)
+    applyProg = function(v)
+        if type(v) == "table" then v = v.Value end
+        if element and type(v) == "boolean" then
+            pcall(function() element:Set(v) end)
+        end
+    end
+    if flag ~= nil then
+        library.Flags[flag] = {Value = Info.Default == true, Callback = applyProg}
+        library._flagSetters[flag] = function(v) applyProg(v) end
+    end
+    if Info.Default == true then
+        task.spawn(function() pcall(cb, true) end)
+    end
+    return element
+end
+
+local function rfSlider(rfTab, sectionParent, Info)
+    local cb = Info.Callback or function() end
+    local flag = Info.Flag
+    local mn = tonumber(Info.Minimum) or 1
+    local mx = tonumber(Info.Maximum) or 100
+    if mn > mx then mn, mx = mx, mn end
+    local defNum = tonumber(Info.Default) or mn
+    defNum = math.clamp(defNum, mn, mx)
+    local inc = 1
+    if (mn % 1 ~= 0) or (mx % 1 ~= 0) or (defNum % 1 ~= 0) then inc = 0.1 end
+    local element = nil
+    local settings = {
+        Name = Info.Text or "Slider",
+        Range = {mn, mx},
+        Increment = inc,
+        Suffix = Info.ValueName or Info.Postfix or "",
+        CurrentValue = defNum,
+        Callback = function(v)
+            if flag ~= nil then library.Flags[flag] = v end
+            task.spawn(function() pcall(cb, v) end)
+        end,
+    }
+    element = createRF(rfTab, "CreateSlider", settings, sectionParent)
+    if flag ~= nil then
+        library.Flags[flag] = defNum
+        library._flagSetters[flag] = function(v)
+            if type(v) == "table" then v = v.Value or v.value end
+            local n = tonumber(v)
+            if not n or not element then return end
+            n = math.clamp(n, mn, mx)
+            pcall(function() element:Set(n) end)
+        end
+    end
+    task.spawn(function() pcall(cb, defNum) end)
+    return element
+end
+
+local function rfButton(rfTab, sectionParent, Info)
+    local cb = Info.Callback or function() end
+    local settings = {
+        Name = Info.Text or "Button",
+        Callback = function() task.spawn(function() pcall(cb) end) end,
+    }
+    return createRF(rfTab, "CreateButton", settings, sectionParent)
+end
+
+local function rfKeybind(rfTab, sectionParent, Info)
+    local cb = Info.Callback or function() end
+    local flag = Info.Flag
+    local mode = (Info.Mode == "Hold") and "Hold" or "Toggle"
+    local bypass = Info.BypassGameProcessed == true
+    local keyName = keyNameFromDefault(Info.Default)
+    local pressKey, pressInputType = resolveKey(keyName)
+    local holding = false
+    local element = nil
+
+    library._uid = library._uid + 1
+    local unique = (Info.Text or "Keybind") .. string.rep(ZWSP, library._uid)
+
+    -- Rayfield-элемент: отображение клавиши + смена её мышкой.
+    -- Срабатывание колбэка делает собственный обработчик ниже
+    -- (точно такая же семантика, как у старой Endoris-библиотеки).
+    local settings = {
+        Name = unique,
+        CurrentKeybind = (keyName ~= "" and keyName) or "Unknown",
+        HoldToInteract = mode == "Hold",
+        Callback = function() end,
+    }
+    element = createRF(rfTab, "CreateKeybind", settings, sectionParent)
+
+    local function matches(input)
+        if pressInputType and input.UserInputType == pressInputType then return true end
+        if pressKey ~= Enum.KeyCode.Unknown and input.KeyCode == pressKey then return true end
+        return false
+    end
+
+    UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if isRebindingKey() then return end
+        if gameProcessed and not bypass then return end
+        if not matches(input) then return end
+        if mode == "Hold" then
+            holding = true
+            task.spawn(function() pcall(cb, true) end)
+        else
+            holding = not holding
+            task.spawn(function() pcall(cb, holding) end)
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(input)
+        if not matches(input) then return end
+        if mode == "Hold" and holding then
+            holding = false
+            task.spawn(function() pcall(cb, false) end)
+        end
+    end)
+
+    local function applyKey(name)
+        keyName = (name and name ~= "Unknown") and name or ""
+        pressKey, pressInputType = resolveKey(keyName)
+        if flag ~= nil then
+            library.Flags[flag] = {Key = keyName, Mode = mode}
+        end
+    end
+
+    if element then
+        pcall(function()
+            local entry = rfTab.Elements[unique]
+            local frame = entry and entry.element
+            local kf = frame and frame:FindFirstChild("KeybindFrame")
+            local box = kf and kf:FindFirstChild("KeybindBox")
+            if box then
+                box.Focused:Connect(function() library.ChangingKeybind = true end)
+                box.FocusLost:Connect(function()
+                    task.delay(0.2, function() library.ChangingKeybind = false end)
+                end)
+            end
+        end)
+        table.insert(library._keybindSync, {
+            last = settings.CurrentKeybind,
+            get = function() return element.CurrentKeybind end,
+            apply = applyKey,
+        })
+    end
+
+    if flag ~= nil then
+        library.Flags[flag] = {Key = keyName, Mode = mode}
+        library._flagSetters[flag] = function(v)
+            if type(v) ~= "table" then return end
+            local newKey = (v.Key ~= nil) and v.Key or keyName
+            if v.Mode == "Hold" or v.Mode == "Toggle" then mode = v.Mode end
+            applyKey(newKey)
+            if element then
+                pcall(function() element:Set(newKey ~= "" and newKey or "Unknown") end)
+            end
+        end
+    end
+    return element
+end
+
+local function rfDropdown(rfTab, sectionParent, Info)
+    local cb = Info.Callback or function() end
+    local flag = Info.Flag
+    local baseText = Info.Text or "Dropdown"
+    local currentList = Info.List or {}
+    library._uid = library._uid + 1
+    local unique = baseText .. string.rep(ZWSP, library._uid)
+
+    local wrap = {}
+    local element = nil
+
+    local function handle(opt)
+        local v = opt
+        if type(v) == "table" then v = v[1] end
+        if flag ~= nil then library.Flags[flag] = v end
+        task.spawn(function() pcall(cb, v) end)
+    end
+
+    local function create()
+        local settings = {
+            Name = unique,
+            Options = currentList,
+            CurrentOption = {},
+            MultipleOptions = false,
+            Callback = handle,
+        }
+        return createRF(rfTab, "CreateDropdown", settings, sectionParent)
+    end
+
+    element = create()
+
+    local function findFrame()
+        local ok, entry = pcall(function() return rfTab.Elements[unique] end)
+        if ok and type(entry) == "table" then return entry.element end
+        return nil
+    end
+
+    function wrap:Refresh(RInfo)
+        local newList = {}
+        if type(RInfo) == "table" then
+            newList = RInfo.List or RInfo.Options or {}
+        end
+        currentList = newList
+        -- встроенный Refresh, если библиотека его предоставляет
+        if element and type(element.Refresh) == "function" then
+            local ok = pcall(function() element:Refresh(newList) end)
+            if ok then return end
+        end
+        -- иначе пересоздаём элемент на том же месте списка
+        local oldFrame = findFrame()
+        local container = oldFrame and oldFrame.Parent or nil
+        local oldOrder = nil
+        if container then
+            local i = 0
+            for _, ch in ipairs(container:GetChildren()) do
+                ch.LayoutOrder = i
+                i = i + 1
+            end
+            oldOrder = oldFrame.LayoutOrder
+        end
+        if element then pcall(function() element:Destroy() end) end
+        element = create()
+        local newFrame = findFrame()
+        if newFrame and oldOrder then newFrame.LayoutOrder = oldOrder end
+    end
+
+    if flag ~= nil then library.Flags[flag] = nil end
+    if Info.Default ~= nil then
+        if flag ~= nil then library.Flags[flag] = Info.Default end
+        task.spawn(function() pcall(cb, Info.Default) end)
+    end
+    return wrap
+end
+
+-- ---------------------- Window / Tab / Section ----------------------
+
+local function dummyHost()
+    local t = {}
+    local function nop() end
+    function t:Toggle() return {Set = nop} end
+    function t:Slider() return {Set = nop} end
+    function t:Button() return {} end
+    function t:Keybind() return {Set = nop} end
+    function t:Dropdown() return {Refresh = nop} end
+    function t:Label() return {} end
+    function t:Section() return dummyHost() end
+    function t:Tab() return dummyHost() end
+    return t
+end
+
+local function makeHost(rfTab, secParent)
+    local host = {}
+    function host:Toggle(I) return rfToggle(rfTab, secParent, I) or {Set = function() end} end
+    function host:Slider(I) return rfSlider(rfTab, secParent, I) or {Set = function() end} end
+    function host:Button(I) return rfButton(rfTab, secParent, I) or {} end
+    function host:Keybind(I) return rfKeybind(rfTab, secParent, I) or {Set = function() end} end
+    function host:Dropdown(I) return rfDropdown(rfTab, secParent, I) end
+    function host:Label(I)
+        pcall(function() rfTab:CreateLabel(I and I.Text or "Label", secParent) end)
+        return {Set = function() end}
+    end
+    return host
+end
+
+function library:Window(Info)
+    local okW, rfWindow = pcall(function()
+        return Rayfield:CreateWindow({
+            Name = Info.Text or "EndorisFTAP Reborn",
+            LoadingTitle = "EndorisFTAP Reborn",
+            LoadingSubtitle = "skehook (discord) | Rayfield",
+            ConfigurationSaving = {Enabled = false},
+            KeySystem = false,
+        })
+    end)
+    if not okW or not rfWindow then
+        warn("[Rayfield] CreateWindow failed")
+        return dummyHost()
+    end
+
+    -- находим ScreenGui библиотеки (нужен для Menu Toggle / Menu Scale)
+    task.spawn(function()
+        for _ = 1, 200 do
+            local found = nil
+            pcall(function()
+                local roots = {}
+                if gethui then table.insert(roots, gethui()) end
+                table.insert(roots, CoreGui)
+                if LocalPlayer then
+                    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+                    if pg then table.insert(roots, pg) end
+                end
+                for _, root in ipairs(roots) do
+                    for _, sg in ipairs(root:GetChildren()) do
+                        if sg:IsA("ScreenGui") and sg:FindFirstChild("Main") then
+                            local main = sg.Main
+                            if main:FindFirstChild("Topbar")
+                                and (main:FindFirstChild("TabList") or main:FindFirstChild("LoadingFrame")) then
+                                found = sg
+                            end
+                        end
+                        if found then break end
+                    end
+                    if found then break end
+                end
+            end)
+            if found then library.ScreenGui = found return end
+            task.wait(0.1)
+        end
+    end)
+
+    local window = {}
+    function window:Tab(TInfo)
+        local okT, rfTab = pcall(function() return rfWindow:CreateTab(TInfo and TInfo.Text or "Tab") end)
+        if not okT or not rfTab then return dummyHost() end
+
+        local tab = {}
+        function tab:Section(SInfo)
+            local secParent = nil
+            pcall(function()
+                secParent = rfTab:CreateSection(SInfo and SInfo.Text or "Section")
+            end)
+            return makeHost(rfTab, secParent)
+        end
+        local flat = makeHost(rfTab, nil)
+        tab.Toggle = flat.Toggle
+        tab.Slider = flat.Slider
+        tab.Button = flat.Button
+        tab.Keybind = flat.Keybind
+        tab.Dropdown = flat.Dropdown
+        tab.Label = flat.Label
+        return tab
+    end
+    return window
+end
+
+-- синхронизация клавиш, сменённых через интерфейс Rayfield
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        for _, entry in ipairs(library._keybindSync) do
+            local ok, cur = pcall(entry.get)
+            if ok and type(cur) == "string" and cur ~= entry.last then
+                entry.last = cur
+                pcall(entry.apply, cur)
+            end
+        end
+    end
+end)
+
 if not library then warn("library is nil") return end
+-- ===================== /RAYFIELD UI EDITION =====================
 
 local function fixSectionAfterRefresh()
     task.delay(0.2, function()
