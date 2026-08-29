@@ -10,12 +10,14 @@ local RunService = game:GetService("RunService")
 local Lighting = game:GetService("Lighting")
 local Debris = game:GetService("Debris")
 local TweenService = game:GetService("TweenService")
+local ReplicatedFirst = game:GetService("ReplicatedFirst")
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 local Camera = Workspace.CurrentCamera
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local clickAuraEnabled = false
 
 if game.PlaceId ~= 6961824067 then
     LocalPlayer:Kick("Join Fling Things And People")
@@ -27,22 +29,6 @@ if UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled then
     return
 end
 
-do
-    local execName = nil
-    if getexecutorname then
-        execName = getexecutorname()
-    elseif identifyexecutor then
-        execName = identifyexecutor()
-    end
-    if execName then
-        execName = execName:lower()
-        if execName:find("xeno") or execName:find("jjsploit") then
-            LocalPlayer:Kick("Executor not supported. Try use Solara or other")
-            return
-        end
-    end
-end
-
 -- ===================== RAYFIELD UI EDITION =====================
 -- UI заменён со старой Endoris-библиотеки на Rayfield Interface Suite
 -- (ArrayField — поддерживаемый билд Rayfield, оригинальный репозиторий
@@ -52,23 +38,56 @@ end
 local RAYFIELD_SOURCES = {
     "https://raw.githubusercontent.com/UI-Interface/CustomFIeld/main/RayField.lua",
     "https://raw.githubusercontent.com/ArowixExploits/RayfieldUILibrary/main/source",
+    "https://sirius.menu/rayfield",
 }
+
+-- Executors expose HTTP and Lua compilation through slightly different APIs.
+-- Try the normal Roblox-compatible path first, then common executor request APIs.
+local function fetchSource(url)
+    local ok, source = pcall(function() return game:HttpGet(url) end)
+    if ok and type(source) == "string" and #source > 0 then
+        return source
+    end
+
+    local requestFn = type(request) == "function" and request or http_request
+    if type(requestFn) ~= "function" and type(syn) == "table" then requestFn = syn.request end
+    if type(requestFn) == "function" then
+        local reqOk, response = pcall(function()
+            return requestFn({Url = url, Method = "GET"})
+        end)
+        if reqOk and type(response) == "table" then
+            local body = response.Body or response.body
+            if type(body) == "string" and #body > 0 then return body end
+        end
+    end
+
+    return nil
+end
+
+local function compileSource(source)
+    local compiler = loadstring or load
+    if type(compiler) ~= "function" then return nil end
+    local ok, loader = pcall(compiler, source)
+    return ok and type(loader) == "function" and loader or nil
+end
 
 local Rayfield = nil
 for _, srcUrl in ipairs(RAYFIELD_SOURCES) do
     local ok, result = pcall(function()
-        local source = game:HttpGet(srcUrl)
-        local loader = loadstring(source)
-        if type(loader) ~= "function" then error("loadstring failed") end
+        local source = fetchSource(srcUrl)
+        if not source then error("HTTP request failed") end
+        local loader = compileSource(source)
+        if not loader then error("Lua compiler unavailable or source is invalid") end
         return loader()
     end)
     if ok and type(result) == "table" then
         Rayfield = result
         break
     end
+    warn("[Rayfield] source failed: " .. srcUrl)
 end
 if not Rayfield then
-    warn("[Rayfield] failed to load UI library")
+    warn("[Rayfield] failed to load UI library; check HTTP/loadstring support")
     return
 end
 
@@ -492,33 +511,6 @@ end)
 if not library then warn("library is nil") return end
 -- ===================== /RAYFIELD UI EDITION =====================
 
-local function fixSectionAfterRefresh()
-    task.delay(0.2, function()
-        pcall(function()
-            if not library._dropdownTracker then return end
-            for _, entry in ipairs(library._dropdownTracker) do
-                if entry.sectionFrame and entry.section then
-                    local sectionFrame = entry.sectionFrame
-                    local section = entry.section
-                    local contentH = 0
-                    local childCount = 0
-                    for _, child in sectionFrame:GetChildren() do
-                        if child:IsA("Frame") then
-                            contentH = contentH + child.Size.Y.Offset
-                            childCount = childCount + 1
-                        end
-                    end
-                    local layout = sectionFrame:FindFirstChildOfClass("UIListLayout")
-                    local layoutPadding = layout and layout.Padding.Offset or 0
-                    local gapsH = math.max(0, childCount - 1) * layoutPadding
-                    local frameH = 23 + contentH + gapsH + 3
-                    section.Size = UDim2.new(1, 0, 0, frameH + 6)
-                    sectionFrame.Size = UDim2.new(1, 0, 0, frameH)
-                end
-            end
-        end)
-    end)
-end
 
 local characterEventsFolder = ReplicatedStorage:WaitForChild("CharacterEvents")
 local ragdollRemoteEvent = characterEventsFolder:WaitForChild("RagdollRemote")
@@ -657,8 +649,6 @@ local Settings = {
         Radius = 15,
         Height = 5,
         Speed = 10,
-        TargetSpawned = false,
-        Toy = "PalletLightBrown",
         CustomMainPart = nil,
         grabToysFly = false,
         RotX = 0,
@@ -676,44 +666,41 @@ local Settings = {
 }
 
 local State = {
-    connections = { antiGrab = nil, antiExplosionChar = nil, thirdPerson = nil, fpsBooster = nil, strength = nil },
-    loops = { kunaiCheck = nil, antiBanana = nil, noclip = nil },
+    connections = { antiGrab = nil, antiExplosionChar = nil, fpsBooster = nil, strength = nil },
+    loops = { kunaiCheck = nil, noclip = nil },
     struggleTasks = {},
     antiGucci = {
-        safePosition = nil, restoreFrames = 0, connection = nil,
+        safePosition = nil, connection = nil,
         safePositionTrain = nil, connectionTrain = nil, hasSatThisLife = false, sitTimerTrain = nil, trainGucciLoop = false, trainGucciThread = nil, trainCharConn = nil,
     },
     paintPartsBackup = {}, paintConnections = {},
     currentKunai = nil, isBarrierRunning = false, originalSettings = nil,
     barrierNoclip = false,
-    timers = { AntiBananaTimer = 0, LastUpdate = 0, UPDATE_INTERVAL = 0.03, espTimer = 0 },
-    IsCharacterInRagdoll = false, Root = nil, HRPs = {}, LastGrabbedTarget = nil,
+    Root = nil, HRPs = {}, LastGrabbedTarget = nil,
     snowballRagdollActive = false, snowballRagdollTask = nil, snowballTarget = nil,
     CameraClone = nil, CameraInitialized = false,
     noclipRunning = false, noclipTrackedParts = {},
     pcldConn = nil, pcldParts = nil, pcldTime = 0,
-    antiKillSpamConnection = nil, antiKillIsHolding = false, antiKillLastActionTime = 0,
+    antiKillSpamConnection = nil,
     antiFireConn = nil, antiFireOriginalCF = nil, antiRagdollConns = nil,
-    gamepassWorking = false, gamepassDiedHandle = nil, gamepassScriptNotify = nil, gamepassActivator = nil,
+    gamepassDiedHandle = nil, gamepassScriptNotify = nil, gamepassActivator = nil,
     antiInputLagConn = nil,
     antiRagBlobConns = {}, antiOwnershipConns = {},
     antiBananaSitConn = nil,
     antiBlobmanKillConn = nil, fightBackConn = nil,
-    driftKickConn = nil, kickAllV2Conn = nil,
+    driftKickConn = nil,
     miniMapGui = nil, miniMapPixels = {}, miniMapPlayerDots = {},
     miniMapRenderConn = nil, miniMapInputConns = {},
     miniMapZoom = 500, miniMapGridRes = 28, miniMapOffset = Vector3.zero,
     miniMapLastScanPos = Vector3.zero, miniMapLastScanTime = 0,
     masturbAnimTrack = nil, masturbLoop = nil, packetLagConn = nil,
-    svastonConn = nil,
     GrabMaintainConnections = {},
     phantomPalletsConn = nil,
     palletGodConn = nil,
-    freezePart = nil, cameraAnchor = nil, originalCameraSubject = nil,
+    freezePart = nil,
     ReachDistance = 30,
     splashAbove = {}, splashDebounce = {}, splashLastPos = {},
     shakeOffset = CFrame.identity, shakeActive = false, SPLASH_Y_DYNAMIC = -20,
-    skyGrabTask = nil,
     highlightObjectsConn = nil,
     isRespawning = false,
 }
@@ -838,9 +825,6 @@ function RemoteDispatcher:Stop()
     self._running = false
 end
 
-function RemoteDispatcher:GetStats()
-    return self._stats.totalFires, self._stats.deduplicated, self._pendingCount
-end
 
 RemoteDispatcher:Start()
 
@@ -864,35 +848,42 @@ do
         setupDiedListener(LocalPlayer.Character)
     end
 
-    pcall(function()
-        local oldNamecall
-        oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
-            if RemoteDispatcher._processing then
-                return oldNamecall(self, ...)
-            end
-            local method = getnamecallmethod()
-            if method == "FireServer" then
-                if State.isRespawning and not clickAuraEnabled then
+    if type(hookmetamethod) == "function"
+        and type(newcclosure) == "function"
+        and type(getnamecallmethod) == "function" then
+        local hookOk, hookErr = pcall(function()
+            local oldNamecall
+            oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+                if RemoteDispatcher._processing then
+                    return oldNamecall(self, ...)
+                end
+                local method = getnamecallmethod()
+                if method == "FireServer" then
+                    if State.isRespawning and not clickAuraEnabled then
+                        local ok, name = pcall(function() return self.Name end)
+                        if ok and RemoteDispatcher._highFreqNames[name] then
+                            return nil
+                        end
+                    end
                     local ok, name = pcall(function() return self.Name end)
                     if ok and RemoteDispatcher._highFreqNames[name] then
+                        RemoteDispatcher:Fire(self, ...)
                         return nil
                     end
                 end
-                local ok, name = pcall(function() return self.Name end)
-                if ok and RemoteDispatcher._highFreqNames[name] then
-                    RemoteDispatcher:Fire(self, ...)
-                    return nil
+                if method == "InvokeServer" then
+                    local ok, name = pcall(function() return self.Name end)
+                    if ok and RemoteDispatcher._highFreqNames[name] then
+                        return RemoteDispatcher:Invoke(self, ...)
+                    end
                 end
-            end
-            if method == "InvokeServer" then
-                local ok, name = pcall(function() return self.Name end)
-                if ok and RemoteDispatcher._highFreqNames[name] then
-                    return RemoteDispatcher:Invoke(self, ...)
-                end
-            end
-            return oldNamecall(self, ...)
-        end))
-    end)
+                return oldNamecall(self, ...)
+            end))
+        end)
+        if not hookOk then warn("[Dispatcher] hook unavailable: " .. tostring(hookErr)) end
+    else
+        warn("[Dispatcher] optional metamethod hook is unavailable; using direct remote calls")
+    end
 end
 
 local antiExplosionConnection = nil
@@ -912,8 +903,6 @@ function Utility.GetPlayerCFrame()
     local root = Utility.GetPlayerRootPart()
     return root and root.CFrame
 end
-function Utility.getHum(char) return char and char:FindFirstChildOfClass("Humanoid") end
-function Utility.getRoot(char) return char and (char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Torso")) end
 function Utility.waitForChild(parent, childName, timeout)
     local startTime = tick()
     while tick() - startTime < (timeout or 5) do
@@ -924,19 +913,11 @@ function Utility.waitForChild(parent, childName, timeout)
     return nil
 end
 
-local PROTECTED_PLAYER = "5fkX0ofvIGfU"
-local function isProtectedPlayer(name)
-    return false
-end
 
 local FTAP = {}
 function FTAP.SetNetworkOwner(part, cf)
     if not part or not part.Parent then return end
     RemoteDispatcher:Fire(setNetworkOwnerEvent, part, cf or Utility.GetPlayerCFrame())
-end
-function FTAP.DestroyGrabLine(part)
-    if not part then return end
-    RemoteDispatcher:Fire(destroyGrabLineEvent, part)
 end
 
 
@@ -1080,20 +1061,6 @@ end
 local fadeInInfo = TweenInfo.new(0.3, Enum.EasingStyle.Linear)
 local fadeOutInfo = TweenInfo.new(0.6, Enum.EasingStyle.Linear)
 
-function AntiFeature.typeKunaiMessage(msg, charDelay)
-    charDelay = charDelay or 0.038
-    if not kunaiTextLabel then AntiFeature.createKunaiMessageGui() end
-    kunaiTextLabel.Text = ""
-    TweenService:Create(kunaiTextLabel, fadeInInfo, {TextTransparency = 0}):Play()
-    task.spawn(function()
-        for i = 1, #msg do
-            kunaiTextLabel.Text = msg:sub(1, i)
-            task.wait(charDelay)
-        end
-        task.wait(2.5)
-        TweenService:Create(kunaiTextLabel, fadeOutInfo, {TextTransparency = 1}):Play()
-    end)
-end
 
 function AntiFeature.getRightLeg(char)
     return char:FindFirstChild("Right Leg")
@@ -1102,16 +1069,6 @@ function AntiFeature.getRightLeg(char)
         or char:FindFirstChild("RightUpperLeg")
 end
 
-function AntiFeature.cleanupMyKunaiToys()
-    if not spawnedInToysFolder then return end
-    for _, toy in ipairs(spawnedInToysFolder:GetChildren()) do
-        if toy.Name == "NinjaKunai" or toy.Name == "NinjaShuriken" or toy.Name == "AntiKick" then
-            pcall(function()
-                DeleteToyRE:FireServer(toy)
-            end)
-        end
-    end
-end
 
 function AntiFeature.attachKunai(isReattach)
     if State.kunaiAttaching then return end
@@ -1178,22 +1135,6 @@ function AntiFeature.attachKunai(isReattach)
     State.kunaiAttaching = false
 end
 
-function AntiFeature.isKunaiAttached()
-    if not Settings.Anti.AntiKickKunai then return false end
-    if not spawnedInToysFolder then return false end
-    local kunai = nil
-    for _, obj in spawnedInToysFolder:GetChildren() do
-        if obj.Name == "NinjaKunai" then kunai = obj break end
-    end
-    if not kunai or not kunai:FindFirstChild("StickyPart") then return false end
-    local leg = AntiFeature.getRightLeg(Utility.GetPlayerCharacter())
-    if not leg then return false end
-    local sticky = kunai.StickyPart
-    local weld = sticky:FindFirstChild("StickyWeld")
-    if weld and weld.Part1 == leg then return true end
-    local dist = (sticky.Position - leg.Position).Magnitude
-    return dist < 7
-end
 
 function AntiFeature.setTouchQuery(state)
     local char = Workspace:FindFirstChild(LocalPlayer.Name)
@@ -1293,7 +1234,7 @@ function AntiFeature.startAntiGucci()
 
     seat:Sit(humanoid)
 
-    local grabThread = task.spawn(function()
+    task.spawn(function()
         local gucciFrame = 0
         while gucciRunning do
             for _, part in ipairs(blob:GetDescendants()) do
@@ -1508,12 +1449,6 @@ function AntiFeature.stopAntiGucciTrain()
     end
 end
 
-function AntiFeature.ragdoll()
-    local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-    if hrp then
-        ragdollRemoteEvent:FireServer(hrp, 0)
-    end
-end
 
 function AntiFeature.startAntiBlobmanKill()
     if State.antiBlobmanKillConn then State.antiBlobmanKillConn:Disconnect() end
@@ -1662,28 +1597,6 @@ end
 function BlobmanBetaFeature.getInv()
     return Workspace:FindFirstChild(LocalPlayer.Name .. "SpawnedInToys")
 end
-function BlobmanBetaFeature.getCurrentPlot()
-    local myRoot = BlobmanBetaFeature.getLocalRoot()
-    if not myRoot then return nil end
-    local plots = Workspace:FindFirstChild("PlotItems")
-    if not plots then return nil end
-    for i = 1, 5 do
-        local plot = plots:FindFirstChild("Plot" .. i)
-        if plot then
-            local pp = plot:FindFirstChildWhichIsA("Part") or plot:FindFirstChild("Baseplate")
-            if not pp then
-                for _, v in ipairs(plot:GetChildren()) do
-                    if v:IsA("BasePart") then pp = v break end
-                end
-            end
-            if pp then
-                local dist = (myRoot.Position - pp.Position).Magnitude
-                if dist < 100 then return plot end
-            end
-        end
-    end
-    return nil
-end
 function BlobmanBetaFeature.SetNetworkOwner(part)
     pcall(function() setNetworkOwnerEvent:FireServer(part, BlobmanBetaFeature.getLocalRoot().CFrame) end)
 end
@@ -1802,10 +1715,6 @@ function BlobmanBetaFeature.spawnBlobman()
     end
     return BlobmanBetaFeature.getBlobman()
 end
-function BlobmanBetaFeature.destroyBlobman()
-    local blob = BlobmanBetaFeature.getBlobman()
-    if blob then pcall(function() DeleteToyRE:FireServer(blob) end) end
-end
 function BlobmanBetaFeature.resetBlobmanPhysics()
     local blob = BlobmanBetaFeature.getBlobman()
     if not blob then return end
@@ -1829,10 +1738,6 @@ function BlobmanBetaFeature.isSittingOnBlobman()
     return hum and hum.Sit and hum.SeatPart and hum.SeatPart.Parent and hum.SeatPart.Parent.Name == "CreatureBlobman"
 end
 
-function BlobmanBetaFeature.ensureSeatedOnBlobman()
-    if BlobmanBetaFeature.isSittingOnBlobman() then return true end
-    return BlobmanBetaFeature.forceSitBlobman()
-end
 function BlobmanBetaFeature.ensureSitBlobman()
     local blob = BlobmanBetaFeature.getBlobman()
     if not blob or not blob:FindFirstChild("VehicleSeat") then
@@ -1992,7 +1897,7 @@ end
 function BlobmanBetaFeature.GetPlayerList()
     local list = {}
     for _, plr in pairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and not isProtectedPlayer(plr.Name) then
+        if plr ~= LocalPlayer then
             table.insert(list, plr.DisplayName .. " @" .. plr.Name)
         end
     end
@@ -2000,14 +1905,12 @@ function BlobmanBetaFeature.GetPlayerList()
 end
 function BlobmanBetaFeature.checkTarget()
     if not Settings.BlobmanBeta.selectedTarget then warn("Select target") return nil end
-    if isProtectedPlayer(Settings.BlobmanBeta.selectedTarget) then warn("Player is protected") return nil end
     local target = Players:FindFirstChild(Settings.BlobmanBeta.selectedTarget)
     if not target then warn("Target not found") return nil end
     return target
 end
 function BlobmanBetaFeature.isValidTarget(plr, myRoot)
     if plr == LocalPlayer then return false end
-    if isProtectedPlayer(plr.Name) then return false end
     if Settings.BlobmanBeta.ignoreFriends or Settings.Loop.WhitelistFriends then
         local isFriend = false
         pcall(function() isFriend = plr:IsFriendsWith(LocalPlayer.UserId) end)
@@ -2029,7 +1932,6 @@ end
 
 function BlobmanBetaFeature.destroyPlayerGucci(targetPlayer)
     if not targetPlayer or targetPlayer == LocalPlayer then return false end
-    if isProtectedPlayer(targetPlayer.Name) then return false end
     local folderName = targetPlayer.Name .. "SpawnedInToys"
     local toysFolder = Workspace:FindFirstChild(folderName)
     if not toysFolder then return false end
@@ -2066,7 +1968,7 @@ end
 function BlobmanBetaFeature.StartDestroyGucciLoop()
     while Settings.BlobmanBeta.destroyGucciActive do
         for _, player in ipairs(Players:GetPlayers()) do
-            if player ~= LocalPlayer and not isProtectedPlayer(player.Name) and player.Character then
+            if player ~= LocalPlayer and player.Character then
                 BlobmanBetaFeature.destroyPlayerGucci(player)
             end
         end
@@ -2332,183 +2234,7 @@ function BlobmanBetaFeature.stopDriftKick()
     end
 end
 
-function BlobmanBetaFeature.startKickAllV2()
-    Settings.BlobmanBeta.kickAllV2Active = true
-    if State.kickAllV2Conn then task.cancel(State.kickAllV2Conn) end
-    State.kickAllV2Conn = task.spawn(function()
-        local allPlayers = {}
-        for _, p in ipairs(Players:GetPlayers()) do
-            if p ~= LocalPlayer and not isProtectedPlayer(p.Name) then
-                if Settings.BlobmanBeta.ignoreFriends then
-                    local isFriend = false
-                    pcall(function() isFriend = LocalPlayer:IsFriendsWith(p.UserId) end)
-                    if isFriend then continue end
-                end
-                table.insert(allPlayers, p)
-            end
-        end
-        if #allPlayers == 0 then Settings.BlobmanBeta.kickAllV2Active = false return end
 
-        local myChar = LocalPlayer.Character
-        local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
-        local myHum = myChar and myChar:FindFirstChildOfClass("Humanoid")
-        if not myHRP or not myHum then Settings.BlobmanBeta.kickAllV2Active = false return end
-
-        local currentBlob = BlobmanBetaFeature.getBlobman()
-            or BlobmanBetaFeature.findAnyBlobman()
-            or BlobmanBetaFeature.spawnBlobman()
-        if not currentBlob or not currentBlob:FindFirstChild("VehicleSeat") then
-            Settings.BlobmanBeta.kickAllV2Active = false return
-        end
-
-        local vehicleSeat = currentBlob.VehicleSeat
-        if not myHum.Sit or myHum.SeatPart ~= vehicleSeat then
-            if vehicleSeat.Occupant and vehicleSeat.Occupant ~= myHum then
-                pcall(function() vehicleSeat.Occupant.Jump = true end)
-                task.wait(0.1)
-            end
-            local sitStart = tick()
-            while Settings.BlobmanBeta.kickAllV2Active and tick() - sitStart < 0.5 do
-                if not currentBlob or not currentBlob.Parent then break end
-                myHRP.CFrame = vehicleSeat.CFrame + Vector3.new(0, 2, 0)
-                pcall(function() vehicleSeat:Sit(myHum) end)
-                if myHum.Sit and myHum.SeatPart == vehicleSeat then break end
-                task.wait(0.03)
-            end
-        end
-            if not (myHum.Sit and myHum.SeatPart and myHum.SeatPart.Parent and myHum.SeatPart.Parent.Name == "CreatureBlobman") then
-                Settings.BlobmanBeta.kickAllV2Active = false return
-            end
-
-            local MyBlob = myHum.SeatPart.Parent
-            local scr = MyBlob:FindFirstChild("BlobmanSeatAndOwnerScript") or MyBlob:FindFirstChild("BlobmanSeatAndOwnerScript[old]")
-            local CreatureGrab = scr and scr:FindFirstChild("CreatureGrab")
-            local CreatureRelease = scr and scr:FindFirstChild("CreatureRelease")
-
-            local allPlayers = {}
-            for _, p in ipairs(Players:GetPlayers()) do
-                if p ~= LocalPlayer and not isProtectedPlayer(p.Name) then
-                    if Settings.BlobmanBeta.ignoreFriends then
-                        local isFriend = false
-                        pcall(function() isFriend = LocalPlayer:IsFriendsWith(p.UserId) end)
-                        if isFriend then continue end
-                    end
-                    local tChar = p.Character
-                    local tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
-                    local tHum = tChar and tChar:FindFirstChildOfClass("Humanoid")
-                    if tRoot and tHum and tHum.Health > 0 then
-                        table.insert(allPlayers, p)
-                    end
-                end
-            end
-            if #allPlayers == 0 then Settings.BlobmanBeta.kickAllV2Active = false return end
-
-            for _, targetPlayer in ipairs(allPlayers) do
-                local targetRoot = targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart")
-                if targetRoot then
-                    myHRP.CFrame = targetRoot.CFrame
-                    task.wait(0.02)
-                    for i = 1, 3 do
-                        pcall(function()
-                            CreatureGrab:FireServer(MyBlob.LeftDetector, targetRoot, MyBlob.LeftDetector.LeftWeld)
-                            CreatureRelease:FireServer(MyBlob.LeftDetector.LeftWeld)
-                        end)
-                        if i < 3 then task.wait(0.08) end
-                    end
-                end
-            end
-
-        local MyBlob = myHum.SeatPart.Parent
-        local LeftDetector = MyBlob:FindFirstChild("LeftDetector")
-        local RightDetector = MyBlob:FindFirstChild("RightDetector")
-        local LeftWeld = LeftDetector and (LeftDetector:FindFirstChild("LeftWeld") or LeftDetector:FindFirstChildWhichIsA("Weld") or LeftDetector:FindFirstChildWhichIsA("RigidConstraint"))
-        local RightWeld = RightDetector and (RightDetector:FindFirstChild("RightWeld") or RightDetector:FindFirstChildWhichIsA("Weld") or RightDetector:FindFirstChildWhichIsA("RigidConstraint"))
-        local scr = MyBlob:FindFirstChild("BlobmanSeatAndOwnerScript") or MyBlob:FindFirstChild("BlobmanSeatAndOwnerScript[old]")
-        local CreatureGrab = scr and scr:FindFirstChild("CreatureGrab")
-        local CreatureRelease = scr and scr:FindFirstChild("CreatureRelease")
-
-        if not CreatureGrab or not CreatureRelease or not LeftDetector or not LeftWeld then
-            Settings.BlobmanBeta.kickAllV2Active = false return
-        end
-
-        for _, targetPlayer in ipairs(allPlayers) do
-            if not Settings.BlobmanBeta.kickAllV2Active then break end
-            local targetChar = targetPlayer.Character
-            local targetRoot = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
-            if targetRoot then
-                myHRP.CFrame = targetRoot.CFrame
-                task.wait(0.02)
-                for i = 1, 3 do
-                    if not Settings.BlobmanBeta.kickAllV2Active then break end
-                    pcall(function()
-                        CreatureGrab:FireServer(LeftDetector, targetRoot, LeftWeld)
-                        CreatureRelease:FireServer(LeftWeld)
-                    end)
-                    if i < 3 then task.wait(0.08) end
-                end
-            end
-        end
-
-        myHRP.CFrame = CFrame.new(0, 100, 0)
-        task.wait(0.1)
-        for _, part in ipairs(MyBlob:GetDescendants()) do
-            if part:IsA("BasePart") then pcall(function() part.Anchored = true end) end
-        end
-        task.wait(0.1)
-
-        local radius = 15
-        for i, targetPlayer in ipairs(allPlayers) do
-            local targetRoot = targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart")
-            if targetRoot then
-                local angle = math.rad((i - 1) * (360 / #allPlayers))
-                local x = radius * math.cos(angle)
-                local z = radius * math.sin(angle)
-                targetRoot.CFrame = CFrame.new(x, 110, z)
-            end
-        end
-        task.wait(0.1)
-
-        for _ = 1, 2 do
-            for _, targetPlayer in ipairs(allPlayers) do
-                local targetRoot = targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart")
-                if targetRoot then
-                    pcall(function()
-                        setNetworkOwnerEvent:FireServer(targetRoot, CFrame.new(targetRoot.Position))
-                        destroyGrabLineEvent:FireServer(targetRoot)
-                    end)
-                end
-            end
-            task.wait(0.1)
-        end
-        task.wait(0.3)
-
-        for _, targetPlayer in ipairs(allPlayers) do
-            if not Settings.BlobmanBeta.kickAllV2Active then break end
-            local targetRoot = targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart")
-            if targetRoot then
-                pcall(function()
-                    CreatureGrab:FireServer(LeftDetector, targetRoot, LeftWeld)
-                end)
-                if RightDetector and RightWeld then
-                    pcall(function()
-                        CreatureGrab:FireServer(RightDetector, targetRoot, RightWeld)
-                    end)
-                end
-            end
-        end
-
-        for _, part in ipairs(MyBlob:GetDescendants()) do
-            if part:IsA("BasePart") then pcall(function() part.Anchored = false end) end
-        end
-
-        Settings.BlobmanBeta.kickAllV2Active = false
-    end)
-end
-
-function BlobmanBetaFeature.stopKickAllV2()
-    Settings.BlobmanBeta.kickAllV2Active = false
-    if State.kickAllV2Conn then task.cancel(State.kickAllV2Conn) State.kickAllV2Conn = nil end
-end
 
 
 
@@ -3082,7 +2808,6 @@ end
 local function SnowballRagdollFunction(targetName)
     local target = Players:FindFirstChild(targetName)
     if not target then return end
-    if isProtectedPlayer(targetName) then return end
     local trackedSnowballs = {}
     while State.snowballRagdollActive do
         if not target or not target.Parent then break end
@@ -3132,7 +2857,7 @@ end
 local function GetSnowballPlayerList()
     local list = {}
     for _, plr in pairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and not isProtectedPlayer(plr.Name) then
+        if plr ~= LocalPlayer then
             table.insert(list, plr.DisplayName .. " @" .. plr.Name)
         end
     end
@@ -3178,7 +2903,6 @@ end})
 local snowballTargetCombo
 mainSnowSec:Button({Text = "Refresh Players", Callback = function()
     pcall(function() snowballTargetCombo:Refresh({Text = "Select Target", List = GetSnowballPlayerList()}) end)
-    fixSectionAfterRefresh(snowballTargetCombo)
 end})
 snowballTargetCombo = mainSnowSec:Dropdown({Text = "Select Target", Flag = "SnowballTargetDropdown", List = GetSnowballPlayerList(), Callback = function(value)
     local name = value:match("@(.+)$")
@@ -4632,7 +4356,6 @@ local ownershipKickTarget = nil
 local ownershipKickCombo
 ownershipKickSec:Button({Text = "Refresh Players", Callback = function()
     pcall(function() ownershipKickCombo:Refresh({Text = "Select Target", List = BlobmanBetaFeature.GetPlayerList()}) end)
-    fixSectionAfterRefresh(ownershipKickCombo)
 end})
 ownershipKickCombo = ownershipKickSec:Dropdown({Text = "Select Target", Flag = "OwnershipKickTarget", List = BlobmanBetaFeature.GetPlayerList(), Callback = function(value)
     local name = value:match("@(.+)$")
@@ -4651,7 +4374,6 @@ ownershipKickSec:Toggle({Text = "Loop Kick", Flag = "OwnershipKickLoop", Default
     if not ownershipKickTarget then warn("[OK] Select target") Settings.Loop.ownershipKickActive = false return end
     ownershipKickTask = task.spawn(function()
         local destroyGrabLineEvent = grabEventsFolder:WaitForChild("DestroyGrabLine")
-        local createGrabLineEvent = grabEventsFolder:WaitForChild("CreateGrabLine")
         local setNetworkOwnerEvent = grabEventsFolder:WaitForChild("SetNetworkOwner")
 
         local function startFloating()
@@ -4682,7 +4404,6 @@ ownershipKickSec:Toggle({Text = "Loop Kick", Flag = "OwnershipKickLoop", Default
 
         local function checkAlive(target)
             if not target or target == LocalPlayer then return false end
-            if isProtectedPlayer(target.Name) then return false end
             if not target.Character then return false end
             local hrp = target.Character:FindFirstChild("HumanoidRootPart")
             local hum = target.Character:FindFirstChildOfClass("Humanoid")
@@ -4842,7 +4563,6 @@ ownershipKickSec:Toggle({Text = "Loop Kick V2", Flag = "OwnershipKickLoopV2", De
 
         local function checkAlive(t)
             if not t or t == LocalPlayer then return false end
-            if isProtectedPlayer(t.Name) then return false end
             if not t.Character then return false end
             local hrp = t.Character:FindFirstChild("HumanoidRootPart")
             local hum = t.Character:FindFirstChildOfClass("Humanoid")
@@ -5113,7 +4833,6 @@ ownershipKickSec:Toggle({Text = "Ragdoll Target", Flag = "OwnershipPalletRagdoll
 
         local function checkAlive(t)
             if not t or t == LocalPlayer then return false end
-            if isProtectedPlayer(t.Name) then return false end
             if not t.Character then return false end
             local hrp = t.Character:FindFirstChild("HumanoidRootPart")
             local hum = t.Character:FindFirstChildOfClass("Humanoid")
@@ -5210,7 +4929,6 @@ local blobSec = BlobmanTab:Section({Text = "Blobman", Side = "Right"})
 local blobTargetCombo
 blobSec:Button({Text = "Refresh Players", Callback = function()
     pcall(function() blobTargetCombo:Refresh({Text = "Select Target", List = BlobmanBetaFeature.GetPlayerList()}) end)
-    fixSectionAfterRefresh()
 end})
 blobTargetCombo = blobSec:Dropdown({Text = "Select Target", Flag = "BlobTargetDropdown", List = BlobmanBetaFeature.GetPlayerList(), Callback = function(value)
     local name = value:match("@(.+)$")
@@ -6273,7 +5991,6 @@ Settings.BlobmanBeta.palletFlingCleanup = nil
 local palletFlingTargetCombo
 blobPalletFlingSec:Button({Text = "Refresh Players", Callback = function()
     pcall(function() palletFlingTargetCombo:Refresh({Text = "Select Target", List = BlobmanBetaFeature.GetPlayerList()}) end)
-    fixSectionAfterRefresh()
 end})
 palletFlingTargetCombo = blobPalletFlingSec:Dropdown({Text = "Select Target", Flag = "PalletFlingTargetDropdown", List = BlobmanBetaFeature.GetPlayerList(), Callback = function(value)
     local name = value:match("@(.+)$")
@@ -6442,7 +6159,6 @@ blobPalletFlingSec:Toggle({Text = "Pallet Fling", Flag = "PalletFling", Default 
             while tick() - flingStart < 0.1 and Settings.BlobmanBeta.palletFlingActive do
                 if not ctHRP or not ctHRP.Parent then break end
 
-                local palletPos = palletSound.Position
                 local targetPos = ctHRP.Position
 
                 local flickX = math.random(-8, 8)
@@ -6481,7 +6197,6 @@ Settings.BlobmanBeta.cloneFlingCleanup = nil
 local cloneFlingTargetCombo
 blobCloneFlingSec:Button({Text = "Refresh Players", Callback = function()
     pcall(function() cloneFlingTargetCombo:Refresh({Text = "Select Target", List = BlobmanBetaFeature.GetPlayerList()}) end)
-    fixSectionAfterRefresh()
 end})
 cloneFlingTargetCombo = blobCloneFlingSec:Dropdown({Text = "Select Target", Flag = "CloneFlingTargetDropdown", List = BlobmanBetaFeature.GetPlayerList(), Callback = function(value)
     local name = value:match("@(.+)$")
@@ -6651,7 +6366,6 @@ Settings.BlobmanBeta.glassBoxFlingCleanup = nil
 local glassBoxFlingTargetCombo
 blobGlassBoxFlingSec:Button({Text = "Refresh Players", Callback = function()
     pcall(function() glassBoxFlingTargetCombo:Refresh({Text = "Select Target", List = BlobmanBetaFeature.GetPlayerList()}) end)
-    fixSectionAfterRefresh()
 end})
 glassBoxFlingTargetCombo = blobGlassBoxFlingSec:Dropdown({Text = "Select Target", Flag = "GlassBoxFlingTargetDropdown", List = BlobmanBetaFeature.GetPlayerList(), Callback = function(value)
     local name = value:match("@(.+)$")
@@ -6865,7 +6579,6 @@ Settings.BlobmanBeta.selfFlingCleanup = nil
 local selfFlingTargetCombo
 blobSelfFlingSec:Button({Text = "Refresh Players", Callback = function()
     pcall(function() selfFlingTargetCombo:Refresh({Text = "Select Target", List = BlobmanBetaFeature.GetPlayerList()}) end)
-    fixSectionAfterRefresh()
 end})
 selfFlingTargetCombo = blobSelfFlingSec:Dropdown({Text = "Select Target", Flag = "SelfFlingTargetDropdown", List = BlobmanBetaFeature.GetPlayerList(), Callback = function(value)
     local name = value:match("@(.+)$")
@@ -7559,7 +7272,6 @@ end})
 
 
 local miscKeybindsSec = MiscTab:Section({Text = "Keybinds", Side = "Right"})
-local pvpSafeEnabled = false
 local pvpSafePlatform = nil
 miscKeybindsSec:Keybind({Text = "PVP SAFE", Flag = "PvpSafe", Callback = function()
     local char = LocalPlayer.Character
@@ -7937,7 +7649,6 @@ local miscBringTarget = nil
 local miscBringCombo
 miscBringSec:Button({Text = "Refresh Players", Callback = function()
     pcall(function() miscBringCombo:Refresh({Text = "Select Target", List = BlobmanBetaFeature.GetPlayerList()}) end)
-    fixSectionAfterRefresh()
 end})
 miscBringCombo = miscBringSec:Dropdown({Text = "Select Target", Flag = "MiscBringDropdown", List = BlobmanBetaFeature.GetPlayerList(), Callback = function(value)
     local name = value:match("@(.+)$")
@@ -7947,7 +7658,6 @@ miscBringSec:Button({Text = "Bring", Callback = function()
     task.spawn(function()
         local targetName = miscBringTarget
         if not targetName then warn("Select target first!") return end
-        if isProtectedPlayer(targetName) then warn("Player is protected") return end
         local target = Players:FindFirstChild(targetName)
         if not target or not target.Character then return end
         local myChar = LocalPlayer.Character
@@ -8101,7 +7811,6 @@ end
 
 miscViewSec:Button({Text = "Refresh Players", Callback = function()
     pcall(function() miscViewCombo:Refresh({Text = "Select Target", List = BlobmanBetaFeature.GetPlayerList()}) end)
-    fixSectionAfterRefresh()
 end})
 miscViewCombo = miscViewSec:Dropdown({Text = "Select Target", Flag = "MiscViewDropdown", List = BlobmanBetaFeature.GetPlayerList(), Callback = function(value)
     local name = value:match("@(.+)$")
@@ -8697,7 +8406,6 @@ end})
 local explosionTargetCombo
 miscExplosionSec:Button({Text = "Refresh Players", Callback = function()
     pcall(function() explosionTargetCombo:Refresh({Text = "Select Target", List = BlobmanBetaFeature.GetPlayerList()}) end)
-    fixSectionAfterRefresh()
 end})
 explosionTargetCombo = miscExplosionSec:Dropdown({Text = "Select Target", Flag = "ExplosionTargetDropdown", List = BlobmanBetaFeature.GetPlayerList(), Callback = function(value)
     local name = value:match("@(.+)$")
@@ -9810,7 +9518,6 @@ end})
 
 
 do
-local Stats = game:GetService("Stats")
 
 local WATER_SPLASH_SFX = "rbxassetid://128701355933535"
 local SPLASH_Y = -18
@@ -9820,15 +9527,6 @@ local SHAKE_MIN_STRENGTH = 0.5
 local SHAKE_SPEED_MIN = 150
 local SHAKE_SPEED_MAX = 550
 
-local function isOceanPart(part)
-    return part
-        and part.Name == "Ocean"
-        and part.Material == Enum.Material.Foil
-        and not part.CanCollide
-        and math.abs(part.Color.R - 0) < 0.1
-        and math.abs(part.Color.G - 0.6) < 0.2
-        and math.abs(part.Color.B - 1) < 0.1
-end
 
 local function doCameraShake(splashPos, impactSpeed, weightMult, isPlayerSplash)
     if not Settings.Misc.cameraShake then return end
@@ -10020,7 +9718,6 @@ local function spawnSplash(touchPos, oceanPart, speed, mass, isPlayer)
     anchor.CFrame = CFrame.new(pos)
     anchor.Parent = workspace
     local hasSpecialCap = cap ~= nil
-    local baseVol = math.clamp((2 + speedPct * 8) * 5, 2, 50)
     local baseRange = 3000
     local volMult, rangeMult
     if hasSpecialCap and isPlayer then
@@ -10363,7 +10060,7 @@ local function makeInfoLabel(text, order)
     return lbl
 end
 
-local infoPlayerName = makeInfoLabel("Player: " .. LocalPlayer.Name, 1)
+makeInfoLabel("Player: " .. LocalPlayer.Name, 1)
 local infoPlayers = makeInfoLabel("Players: ...", 2)
 local infoPlaytime = makeInfoLabel("Session: 00h 00m 00s", 3)
 local infoUptime = makeInfoLabel("00h 00m 00s", 4)
@@ -10775,61 +10472,7 @@ do
     end})
 end
 
-local b64chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-local function base64Encode(str)
-    local bits = str:gsub(".", function(c)
-        local v = c:byte()
-        local b = ""
-        for i = 7, 0, -1 do
-            local r = v % (2 ^ (i + 1))
-            b = b .. (r >= 2 ^ i and "1" or "0")
-            v = v - (r >= 2 ^ i and 2 ^ i or 0)
-        end
-        return b
-    end)
-    bits = bits .. "0000"
-    local out = ""
-    for i = 1, #bits, 7 do
-        local chunk = bits:sub(i, i + 6)
-        if #chunk < 7 then break end
-        local c = 0
-        for j = 1, 7 do
-            if chunk:sub(j, j) == "1" then c = c + 2 ^ (7 - j) end
-        end
-        c = math.floor(c / 2)
-        out = out .. b64chars:sub(c + 1, c + 1)
-    end
-    local pad = 4 - (#out % 4)
-    if pad == 4 then pad = 0 end
-    return out .. ("="):rep(pad)
-end
 
-local function base64Decode(b64)
-    b64 = b64:gsub("[^A-Za-z0-9+/=]", "")
-    local out = ""
-    for i = 1, #b64, 4 do
-        local chunk = b64:sub(i, i + 3)
-        local bits = ""
-        for j = 1, #chunk do
-            local ch = chunk:sub(j, j)
-            if ch == "=" then break end
-            local pos = b64chars:find(ch, 1, true) - 1
-            for k = 5, 0, -1 do
-                bits = bits .. (pos % (2 ^ (k + 1)) >= 2 ^ k and "1" or "0")
-            end
-        end
-        for j = 1, #bits - 7, 8 do
-            local byte = 0
-            for k = 1, 8 do
-                if bits:sub(j + k - 1, j + k - 1) == "1" then
-                    byte = byte + 2 ^ (8 - k)
-                end
-            end
-            out = out .. string.char(byte)
-        end
-    end
-    return out
-end
 
 miscConfigSec:Button({Text = "Export Config", Callback = function()
     warn("[CFG] Export start")
@@ -11338,12 +10981,6 @@ function LegitAimFeature.Start()
     end)
 end
 
-function LegitAimFeature.Stop()
-    if LegitAimFeature.Connection then
-        LegitAimFeature.Connection:Disconnect()
-        LegitAimFeature.Connection = nil
-    end
-end
 
 LegitAimFeature.Start()
 
@@ -11593,11 +11230,6 @@ end)
 
 local LoopFeature = {}
 
-function LoopFeature.isPlayerInPlot(player)
-    local char = player.Character
-    if not char then return false end
-    return char.Parent ~= Workspace
-end
 
 function LoopFeature.IsPlayerInsideSafeZone(player)
     return player:FindFirstChild("InPlot") and player.InPlot.Value
@@ -11605,7 +11237,6 @@ end
 
 function LoopFeature.CheckPlayer(player)
     if player == LocalPlayer then return false end
-    if isProtectedPlayer(player.Name) then return false end
     if Settings.Loop.WhitelistFriends then
         local isFriend = false
         pcall(function() isFriend = LocalPlayer:IsFriendsWith(player.UserId) end)
@@ -11628,10 +11259,6 @@ function LoopFeature.CheckPlayerBring(player)
         and LoopFeature.CheckPlayerVelocity(player) < 20
 end
 
-function LoopFeature.isWhitelisted(player)
-    if not Settings.Loop.WhitelistFriends then return false end
-    return LocalPlayer:IsFriendsWith(player.UserId)
-end
 
 function LoopFeature.setupFreezePart()
     if not State.freezePart then
@@ -11657,33 +11284,7 @@ function LoopFeature.unFreezeCam()
     Workspace.CurrentCamera.CameraType = Enum.CameraType.Custom
 end
 
-function LoopFeature.fixCameraAtCurrentPosition()
-    if State.cameraAnchor then return end
-    local root = Utility.GetPlayerRootPart()
-    if not root then return end
-    State.cameraAnchor = Instance.new("Part")
-    State.cameraAnchor.Name = "CameraAnchor_KillAll"
-    State.cameraAnchor.Anchored = true
-    State.cameraAnchor.CanCollide = false
-    State.cameraAnchor.Transparency = 1
-    State.cameraAnchor.Size = Vector3.new(1, 1, 1)
-    State.cameraAnchor.CFrame = CFrame.new(root.Position + Vector3.new(0, 20, 0))
-    State.cameraAnchor.Parent = Workspace
-    State.originalCameraSubject = Workspace.CurrentCamera.CameraSubject
-    Workspace.CurrentCamera.CameraSubject = State.cameraAnchor
-end
 
-function LoopFeature.restoreCamera()
-    if State.cameraAnchor then
-        local camera = Workspace.CurrentCamera
-        if camera and State.originalCameraSubject then
-            camera.CameraSubject = State.originalCameraSubject
-        end
-        State.cameraAnchor:Destroy()
-        State.cameraAnchor = nil
-        State.originalCameraSubject = nil
-    end
-end
 
 function LoopFeature.startFloating()
     if Settings.Loop.floatConnection then return end
@@ -11736,69 +11337,10 @@ function LoopFeature.CreateBringBody(targetPart, dest)
     bp.Position = typeof(dest) == "CFrame" and dest.Position or dest
 end
 
-function LoopFeature.killPlayer(player)
-    if isProtectedPlayer(player.Name) then return false end
-    local success, err = pcall(function()
-        local char = player.Character
-        if not char then return end
-        local root = char:FindFirstChild("HumanoidRootPart")
-        local hum = char:FindFirstChildOfClass("Humanoid")
-        if not root or not hum or hum.Health <= 0 then return end
-        grabEventsFolder.SetNetworkOwner:FireServer(root, root.CFrame)
-        task.wait(0.1)
-        grabEventsFolder.DestroyGrabLine:FireServer(root)
-        task.wait(0.1)
-        char:BreakJoints()
-    end)
-    return success
-end
 
-function LoopFeature.teleportToPlayer(targetPlayer)
-    local now = tick()
-    if now - Settings.Loop.LastTeleportTime < Settings.Loop.TeleportCooldown then return false end
-    local localRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-    local targetRoot = targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart")
-    if not localRoot or not targetRoot then return false end
-    if not Settings.Loop.OriginalPosition then
-        Settings.Loop.OriginalPosition = localRoot.Position
-    end
-    localRoot.CFrame = CFrame.new(targetRoot.Position + Vector3.new(0, Settings.Loop.TeleportHeight, 0))
-    Settings.Loop.LastTeleportTime = now
-    return true
-end
 
-function LoopFeature.returnToOriginalPosition()
-    if not Settings.Loop.OriginalPosition then return end
-    local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-    if root then root.CFrame = CFrame.new(Settings.Loop.OriginalPosition) end
-end
 
-function LoopFeature.getRespawnPosition()
-    local spawn = Workspace:FindFirstChild("SpawnLocation")
-    if spawn then return spawn.Position end
-    for _, obj in pairs(Workspace:GetDescendants()) do
-        if obj:IsA("SpawnLocation") then return obj.Position end
-    end
-    return Vector3.new(0, 50, 0)
-end
 
-function LoopFeature.sortPlayersByRespawnDistance(players)
-    local respawnPos = LoopFeature.getRespawnPosition()
-    local list = {}
-    for _, player in ipairs(players) do
-        local char = player.Character
-        if char then
-            local root = char:FindFirstChild("HumanoidRootPart")
-            if root then
-                table.insert(list, { player = player, distance = (root.Position - respawnPos).Magnitude })
-            end
-        end
-    end
-    table.sort(list, function(a, b) return a.distance < b.distance end)
-    local sorted = {}
-    for _, data in ipairs(list) do table.insert(sorted, data.player) end
-    return sorted
-end
 
 function LoopFeature.stopBringAll()
     Settings.Loop.BringAll = false
@@ -11872,24 +11414,7 @@ function LoopFeature.startBringAll()
     Utility.GetPlayerRootPart().CFrame = playerCFrame
 end
 
-function LoopFeature.updatePlayerDropdown()
-    local list = {}
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer then
-            table.insert(list, player.DisplayName .. " @" .. player.Name)
-        end
-    end
-    return list
-end
 
-function LoopFeature.getSelectedTargetsDisplay()
-    local names = {}
-    for userId, _ in pairs(Settings.Loop.TargetPlayers) do
-        local p = Players:GetPlayerByUserId(userId)
-        if p then table.insert(names, p.DisplayName .. " @" .. p.Name) end
-    end
-    return #names > 0 and table.concat(names, ", ") or "None"
-end
 
 
 
@@ -12428,7 +11953,6 @@ do
     local perspCamFrozen = false
     local perspFlyConns = {}
     local perspWatcherConns = {}
-    local perspGrabCFrame = CFrame.new(-542.4857177734375, 42.70832824707031, 649.2499389648438)
     local perspInvisLine = false
 
     local function disconnectFly()
@@ -12597,7 +12121,6 @@ local loopBringSec = LoopTab:Section({Text = "Bring All", Side = "Right"})
 loopBringSec:Toggle({Text = "Bring All", Flag = "BringAllToggle", Default = false, Callback = function(state)
     Settings.Loop.BringAll = state
     if state then
-        LoopFeature.restoreCamera()
         coroutine.wrap(LoopFeature.startBringAll)()
     else
         LoopFeature.stopBringAll()
@@ -12655,7 +12178,6 @@ loopBlobKillAllSec:Toggle({Text = "Kill All", Flag = "BlobmanKillAll", Default =
 
                 for _, ct in ipairs(Players:GetPlayers()) do
                     if ct == LocalPlayer then continue end
-                    if isProtectedPlayer(ct.Name) then continue end
                     if Settings.BlobmanBeta.ignoreFriends or Settings.Loop.WhitelistFriends then
                         local isFriend = false
                         pcall(function() isFriend = LocalPlayer:IsFriendsWith(ct.UserId) end)
@@ -12871,7 +12393,7 @@ loopKickAllSec:Toggle({Text = "Kick All V2", Flag = "KickAllV2Loop", Default = f
 
             local allPlayers = {}
             for _, p in ipairs(Players:GetPlayers()) do
-                if p ~= LocalPlayer and not isProtectedPlayer(p.Name) then
+                if p ~= LocalPlayer then
                     if Settings.BlobmanBeta.ignoreFriends or Settings.Loop.WhitelistFriends then
                         local isFriend = false
                         pcall(function() isFriend = LocalPlayer:IsFriendsWith(p.UserId) end)
@@ -13108,7 +12630,6 @@ local function reconnect()
     local humanoid = character:FindFirstChildWhichIsA("Humanoid") or character:WaitForChild("Humanoid")
     local hrp = character:WaitForChild("HumanoidRootPart")
     character:WaitForChild("Head")
-    State.IsCharacterInRagdoll = false
 
     local canBurn = hrp:WaitForChild("FirePlayerPart", 5)
     if canBurn then
@@ -13217,20 +12738,6 @@ local function auraBodyVelocity(part, vel, lifetime)
     Debris:AddItem(bv, lifetime or 1)
 end
 
-local function auraGetPlayersInRange()
-    local root = auraGetRoot()
-    if not root then return {} end
-    local list = {}
-    for _, player in pairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer and not auraIsFriend(player) and not isProtectedPlayer(player.Name) and player.Character then
-            local hrp = player.Character:FindFirstChild("HumanoidRootPart") or player.Character:FindFirstChild("Torso")
-            if hrp and (hrp.Position - root.Position).Magnitude <= Settings.Aura.auraRadius then
-                table.insert(list, player)
-            end
-        end
-    end
-    return list
-end
 
 
 local runningSkyAura = false
@@ -13241,7 +12748,7 @@ auraAtkSec:Toggle({Text = "Sky Aura", Flag = "SkyAura", Default = false, Callbac
             local root = auraGetRoot()
             if root then
                 for _, player in pairs(Players:GetPlayers()) do
-                    if player ~= LocalPlayer and not auraIsFriend(player) and not isProtectedPlayer(player.Name) and player.Character then
+                    if player ~= LocalPlayer and not auraIsFriend(player) and player.Character then
                         pcall(function()
                             local hrp = player.Character:FindFirstChild("HumanoidRootPart")
                             if hrp and (hrp.Position - root.Position).Magnitude <= Settings.Aura.auraRadius then
@@ -13269,7 +12776,7 @@ auraAtkSec:Toggle({Text = "Fling Aura", Flag = "FlingAura", Default = false, Cal
             local root = auraGetRoot()
             if root then
                 for _, player in pairs(Players:GetPlayers()) do
-                    if player ~= LocalPlayer and not auraIsFriend(player) and not isProtectedPlayer(player.Name) and player.Character then
+                    if player ~= LocalPlayer and not auraIsFriend(player) and player.Character then
                         pcall(function()
                             local hrp = player.Character:FindFirstChild("HumanoidRootPart")
                             if hrp and (hrp.Position - root.Position).Magnitude <= Settings.Aura.auraRadius then
@@ -13297,7 +12804,7 @@ auraAtkSec:Toggle({Text = "Void Aura", Flag = "VoidAura", Default = false, Callb
             local root = auraGetRoot()
             if root then
                 for _, player in pairs(Players:GetPlayers()) do
-                    if player ~= LocalPlayer and not auraIsFriend(player) and not isProtectedPlayer(player.Name) and player.Character then
+                    if player ~= LocalPlayer and not auraIsFriend(player) and player.Character then
                         pcall(function()
                             local hrp = player.Character:FindFirstChild("HumanoidRootPart")
                             if hrp and (hrp.Position - root.Position).Magnitude <= Settings.Aura.auraRadius then
@@ -13332,7 +12839,7 @@ auraAtkSec:Toggle({Text = "Spin Aura", Flag = "SpinAura", Default = false, Callb
                     spinAngle = spinAngle + 0.05
                     if spinAngle >= 6.28 then spinAngle = 0 end
                     for _, player in pairs(Players:GetPlayers()) do
-                        if player ~= LocalPlayer and not auraIsFriend(player) and not isProtectedPlayer(player.Name) and player.Character then
+                        if player ~= LocalPlayer and not auraIsFriend(player) and player.Character then
                             local targetChar = player.Character
                             local humanoid = targetChar:FindFirstChildOfClass("Humanoid")
                             local torso = targetChar:FindFirstChild("Torso") or targetChar:FindFirstChild("UpperTorso") or targetChar:FindFirstChild("HumanoidRootPart")
@@ -13447,7 +12954,7 @@ auraAtkSec:Toggle({Text = "Trax Aura", Flag = "TraxAura", Default = false, Callb
                         end
                     elseif not traxAuraTarget then
                         for _, player in pairs(Players:GetPlayers()) do
-                            if player ~= LocalPlayer and not auraIsFriend(player) and not isProtectedPlayer(player.Name) and player.Character then
+                            if player ~= LocalPlayer and not auraIsFriend(player) and player.Character then
                                 local torso = player.Character:FindFirstChild("Torso") or player.Character:FindFirstChild("UpperTorso")
                                 if torso and (torso.Position - root.Position).Magnitude <= Settings.Aura.auraRadius then
                                     traxAuraTarget = player
@@ -13490,7 +12997,7 @@ auraAtkSec:Toggle({Text = "Freeze Aura", Flag = "FreezeAura", Default = false, C
             local root = auraGetRoot()
             if root then
                 for _, player in pairs(Players:GetPlayers()) do
-                    if player ~= LocalPlayer and not auraIsFriend(player) and not isProtectedPlayer(player.Name) and player.Character then
+                    if player ~= LocalPlayer and not auraIsFriend(player) and player.Character then
                         pcall(function()
                             local torso = player.Character:FindFirstChild("Torso") or player.Character:FindFirstChild("HumanoidRootPart")
                             if torso and (torso.Position - root.Position).Magnitude <= Settings.Aura.auraRadius then
@@ -13519,7 +13026,7 @@ auraAtkSec:Toggle({Text = "Spin Players Aura", Flag = "SpinPlayersAura", Default
             local root = auraGetRoot()
             if root then
                 for _, player in pairs(Players:GetPlayers()) do
-                    if player ~= LocalPlayer and not auraIsFriend(player) and not isProtectedPlayer(player.Name) and player.Character then
+                    if player ~= LocalPlayer and not auraIsFriend(player) and player.Character then
                         pcall(function()
                             local hrp = player.Character:FindFirstChild("HumanoidRootPart")
                             if hrp and (hrp.Position - root.Position).Magnitude <= Settings.Aura.auraRadius then
@@ -13550,7 +13057,7 @@ auraAtkSec:Toggle({Text = "Bring Aura", Flag = "BringAura", Default = false, Cal
             local root = auraGetRoot()
             if root then
                 for _, player in pairs(Players:GetPlayers()) do
-                    if player ~= LocalPlayer and not auraIsFriend(player) and not isProtectedPlayer(player.Name) and player.Character then
+                    if player ~= LocalPlayer and not auraIsFriend(player) and player.Character then
                         pcall(function()
                             local hrp = player.Character:FindFirstChild("HumanoidRootPart")
                             if hrp and (hrp.Position - root.Position).Magnitude <= Settings.Aura.auraRadius then
@@ -13567,7 +13074,6 @@ auraAtkSec:Toggle({Text = "Bring Aura", Flag = "BringAura", Default = false, Cal
 end})
 
 
-clickAuraEnabled = false
 local clickAuraAffectedPlayers = {}
 local clickAuraTask = nil
 auraAtkSec:Toggle({Text = "Click Aura", Flag = "ClickAura", Default = false, Callback = function(v)
@@ -13580,7 +13086,7 @@ auraAtkSec:Toggle({Text = "Click Aura", Flag = "ClickAura", Default = false, Cal
                     local root = auraGetRoot()
                     if not root then return end
                     for _, player in pairs(Players:GetPlayers()) do
-                        if player ~= LocalPlayer and not auraIsFriend(player) and not isProtectedPlayer(player.Name) and player.Character then
+                        if player ~= LocalPlayer and not auraIsFriend(player) and player.Character then
                             local targetChar = player.Character
                             local torso = targetChar:FindFirstChild("Torso") or targetChar:FindFirstChild("UpperTorso") or targetChar:FindFirstChild("HumanoidRootPart")
                             local head = targetChar:FindFirstChild("Head")
@@ -13749,7 +13255,7 @@ auraForceSec:Toggle({Text = "Repel Aura", Flag = "RepelAura", Default = false, C
             local root = auraGetRoot()
             if root then
                 for _, player in pairs(Players:GetPlayers()) do
-                    if player ~= LocalPlayer and not auraIsFriend(player) and not isProtectedPlayer(player.Name) and player.Character then
+                    if player ~= LocalPlayer and not auraIsFriend(player) and player.Character then
                         pcall(function()
                             local hrp = player.Character:FindFirstChild("HumanoidRootPart")
                             if hrp and (hrp.Position - root.Position).Magnitude <= Settings.Aura.auraRadius then
@@ -13781,7 +13287,7 @@ auraForceSec:Toggle({Text = "Magnet Aura", Flag = "MagnetAura", Default = false,
             local root = auraGetRoot()
             if root then
                 for _, player in pairs(Players:GetPlayers()) do
-                    if player ~= LocalPlayer and not auraIsFriend(player) and not isProtectedPlayer(player.Name) and player.Character then
+                    if player ~= LocalPlayer and not auraIsFriend(player) and player.Character then
                         local hrp = player.Character:FindFirstChild("HumanoidRootPart")
                         if hrp and (hrp.Position - root.Position).Magnitude <= Settings.Aura.magnetRange then
                             pcall(function()
@@ -14552,10 +14058,9 @@ end
 do
     local TelekinesisFeature = {}
     TelekinesisFeature.activeItems = {}
-    TelekinesisFeature.spawnConn = nil
     TelekinesisFeature.auraConn = nil
-        local GE = ReplicatedStorage:WaitForChild("GrabEvents")
-        local SetNetworkOwner = GE:WaitForChild("SetNetworkOwner")
+    local GE = ReplicatedStorage:WaitForChild("GrabEvents")
+    local SetNetworkOwner = GE:WaitForChild("SetNetworkOwner")
 
     function TelekinesisFeature.getDrivePart(model)
         local main = model:FindFirstChild("Main")
@@ -14697,35 +14202,17 @@ do
             end
         end
         TelekinesisFeature.activeItems = {}
-        if TelekinesisFeature.spawnConn then TelekinesisFeature.spawnConn:Disconnect() TelekinesisFeature.spawnConn = nil end
         if TelekinesisFeature.auraConn then task.cancel(TelekinesisFeature.auraConn) TelekinesisFeature.auraConn = nil end
     end
 
-    function TelekinesisFeature.spawnToy(toyName)
-        local myChar = LocalPlayer.Character
-        local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-        if not myRoot then return end
-        local SpawnedInToys = Workspace:FindFirstChild(LocalPlayer.Name .. "SpawnedInToys")
-        if not SpawnedInToys then return end
-        local connection
-        connection = SpawnedInToys.ChildAdded:Connect(function(child)
-            if child.Name == toyName then
-                connection:Disconnect()
-                task.wait(0.3)
-                TelekinesisFeature.startOrbit(child)
-            end
-        end)
-        local spawnCFrame = myRoot.CFrame * CFrame.new(0, 0, -5)
-        pcall(function() SpawnToyRF:InvokeServer(toyName, spawnCFrame, Vector3.new(0, 0, 0)) end)
-        task.delay(5, function() pcall(function() connection:Disconnect() end) end)
-    end
 
     function TelekinesisFeature.runAura()
         if TelekinesisFeature.auraConn then return end
         TelekinesisFeature.auraConn = task.spawn(function()
+            local createGrabLineEvent = GE:FindFirstChild("CreateGrabLine")
+            local destroyGrabLineEvent = GE:FindFirstChild("DestroyGrabLine")
             local angle = 0
             local lastTime = tick()
-            local scanTick = 0
             local savedCF = nil
             while Settings.Telekinesis.Enabled do
                 task.wait(1e-10)
@@ -14733,9 +14220,6 @@ do
                 local dt = math.max(now - lastTime, 0.001)
                 lastTime = now
 
-                if now - scanTick > 0.1 then
-                    scanTick = now
-                end
 
                 local myChar = LocalPlayer.Character
                 local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
@@ -14946,9 +14430,13 @@ do
                                             end
                                         end
                                     end
-                                    pcall(function() CreateGrabLine:FireServer(dp, Vector3.zero, dp.Position, false) end)
+                                    if createGrabLineEvent then
+                                        pcall(function() createGrabLineEvent:FireServer(dp, Vector3.zero, dp.Position, false) end)
+                                    end
                                     task.wait(0.02)
-                                    pcall(function() DestroyGrabLine:FireServer(dp) end)
+                                    if destroyGrabLineEvent then
+                                        pcall(function() destroyGrabLineEvent:FireServer(dp) end)
+                                    end
                                     task.wait(0.05)
                                     for _, part in ipairs(mdl:GetDescendants()) do
                                         if part:IsA("BasePart") then
@@ -15026,77 +14514,8 @@ do
         end)
     end
 
-    function TelekinesisFeature.startSpawnedWatcher()
-        if TelekinesisFeature.spawnConn then return end
-        local SpawnedInToys = Workspace:FindFirstChild(LocalPlayer.Name .. "SpawnedInToys")
-        if not SpawnedInToys then return end
-        TelekinesisFeature.spawnConn = SpawnedInToys.ChildAdded:Connect(function(child)
-            if not Settings.Telekinesis.Enabled then return end
-            if not Settings.Telekinesis.TargetSpawned then return end
-            local myChar = LocalPlayer.Character
-            local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-            if not myRoot then return end
-            local dp = TelekinesisFeature.getDrivePart(child)
-            if not dp then return end
-            local savedCF = myRoot.CFrame
-            myRoot.CFrame = dp.CFrame
-            task.wait(0.1)
-            pcall(function() SetNetworkOwner:FireServer(dp, myRoot.CFrame) end)
-            pcall(function() CreateGrabLine:FireServer(dp, Vector3.zero, dp.Position, false) end)
-            pcall(function() DestroyGrabLine:FireServer(dp) end)
-            task.wait(0.05)
-            TelekinesisFeature.startOrbit(child, true)
-            task.wait(0.05)
-            myRoot.CFrame = savedCF
-        end)
-    end
 
-    function TelekinesisFeature.stopSpawnedWatcher()
-        if TelekinesisFeature.spawnConn then TelekinesisFeature.spawnConn:Disconnect() TelekinesisFeature.spawnConn = nil end
-    end
 
-    function TelekinesisFeature.scanPlotItems()
-        local plotItems = Workspace:FindFirstChild("PlotItems")
-        if not plotItems then return end
-        for i = 1, 5 do
-            local plotFolder = plotItems:FindFirstChild("Plot" .. i)
-            if plotFolder then
-                for _, model in ipairs(plotFolder:GetDescendants()) do
-                    if model:IsA("Model") and not TelekinesisFeature.activeItems[model] then
-                        local dp = TelekinesisFeature.getDrivePart(model)
-                        if dp then
-                            TelekinesisFeature.startOrbit(model, true)
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    function TelekinesisFeature.scanSpawnedToys()
-        local SpawnedInToys = Workspace:FindFirstChild(LocalPlayer.Name .. "SpawnedInToys")
-        if not SpawnedInToys then return end
-        local myChar = LocalPlayer.Character
-        local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-        if not myRoot then return end
-        for _, child in ipairs(SpawnedInToys:GetChildren()) do
-            if not TelekinesisFeature.activeItems[child] then
-                local dp = TelekinesisFeature.getDrivePart(child)
-                if dp then
-                    local savedCF = myRoot.CFrame
-                    myRoot.CFrame = dp.CFrame
-                    task.wait(0.1)
-                    pcall(function() SetNetworkOwner:FireServer(dp, myRoot.CFrame) end)
-                    pcall(function() CreateGrabLine:FireServer(dp, Vector3.zero, dp.Position, false) end)
-                    pcall(function() SetNetworkOwner:FireServer(dp, myRoot.CFrame) end)
-                    pcall(function() DestroyGrabLine:FireServer(dp) end)
-                    task.wait(0.1)
-                    myRoot.CFrame = savedCF
-                    TelekinesisFeature.startOrbit(child, true)
-                end
-            end
-        end
-    end
 
     TelekinesisFeature.palletExploreConn = nil
 
@@ -15422,13 +14841,6 @@ do
         end
     end
 
-    local function applyMovers(part, targetCF)
-        local data = frozenParts[part]
-        if not data then return end
-        ensureBodyMovers(part, data)
-        data.bp.Position = targetCF.Position
-        data.bg.CFrame = CFrame.new(part.Position) * targetCF.Rotation
-    end
 
     local function startFreezeLoop()
         if freezeConn then
@@ -15458,7 +14870,6 @@ do
             local seatPart = myHum and myHum.SeatPart
 
             local rotMaxSpeed = 100
-            local rotSpringK = 25
 
             for part, data in pairs(frozenParts) do
                 if not part or not part.Parent then
