@@ -1,0 +1,14 @@
+```
+# Lua-specific ignores
+*.lua.bak
+*.luac
+*.backup*
+
+# Backup and temporary files
+*.bak
+*.tmp
+*.temp
+*~
+.#*
+.#
+```
