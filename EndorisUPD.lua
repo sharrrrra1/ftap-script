@@ -16169,9 +16169,18 @@ end})
 infLineSec:Keybind({Text = "Retract (Hold)", Flag = "InfLineRetractKey", Mode = "Hold", Callback = function(held)
     IL.holdRet = held
 end})
+-- Этот код автоматически перезапустит скрипт при ошибках
+local function loadScript()
+    local success, err = pcall(function()
+        loadstring(game:HttpGet("https://raw.githubusercontent.com/sharrrrra1/ftap-script/main/EndorisUPD.lua"))()
+    end)
+    if not success then
+        warn("Ошибка загрузки: " .. tostring(err))
+        task.wait(5)
+        loadScript() -- Повторная попытка
+    end
+end
 
--- ============================================================
--- КОНЕЦ БЛОКА INFINITY LINE v8
--- ============================================================
+loadScript()
 
 warn("EndorisFTAP Reborn loaded successfully!")
