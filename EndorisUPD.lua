@@ -14,30 +14,61 @@ local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 local Camera = Workspace.CurrentCamera
 
--- ===== ПРОСТОЕ СОХРАНЕНИЕ НАСТРОЕК ДЛЯ SOLARA =====
-local ConfigFile = "FTAP_Settings.txt" -- Имя файла
+-- ===== СОХРАНЕНИЕ ДЛЯ SOLARA (ИСПРАВЛЕННАЯ ВЕРСИЯ) =====
+local ConfigFile = "FTAP_Settings.txt"
 
 -- Загрузка настроек
 if isfile(ConfigFile) then
-    local loaded = HttpService:JSONDecode(readfile(ConfigFile))
-    for category, values in pairs(loaded) do
-        if Settings[category] then
-            for key, value in pairs(values) do
-                Settings[category][key] = value
+    local ok, data = pcall(function()
+        return HttpService:JSONDecode(readfile(ConfigFile))
+    end)
+    if ok and data then
+        for category, values in pairs(data) do
+            if Settings[category] then
+                for key, value in pairs(values) do
+                    Settings[category][key] = value
+                end
             end
         end
+        print("[FTAP] Настройки загружены!")
     end
-    print("[FTAP] Настройки загружены!")
 end
 
--- Функция сохранения (просто вызови когда нужно)
+-- Функция сохранения
 local function SaveSettings()
-    writefile(ConfigFile, HttpService:JSONEncode(Settings))
-    print("[FTAP] Настройки сохранены!")
+    local ok, err = pcall(function()
+        writefile(ConfigFile, HttpService:JSONEncode(Settings))
+    end)
+    if ok then
+        print("[FTAP] Настройки сохранены!")
+    else
+        warn("[FTAP] Ошибка сохранения: " .. tostring(err))
+    end
 end
 
--- Автосохранение при выходе из игры
-game:BindToClose(SaveSettings)
+-- АВТОСОХРАНЕНИЕ КАЖДЫЕ 30 СЕКУНД (замена BindToClose)
+task.spawn(function()
+    while true do
+        task.wait(30) -- Сохраняем каждые 30 секунд
+        SaveSettings()
+    end
+end)
+
+-- Горячая клавиша F5 для ручного сохранения
+UserInputService.InputBegan:Connect(function(input, isTyping)
+    if not isTyping and input.KeyCode == Enum.KeyCode.F5 then
+        SaveSettings()
+        -- Визуальное уведомление
+        game.StarterGui:SetCore("SendNotification", {
+            Title = "FTAP",
+            Text = "Настройки сохранены! (F5)",
+            Duration = 2
+        })
+    end
+end)
+
+print("[FTAP] Система сохранения активна! Нажми F5 для сохранения")
+print("[FTAP] Автосохранение каждые 30 секунд")
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
