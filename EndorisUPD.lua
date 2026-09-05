@@ -14,6 +14,31 @@ local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 local Camera = Workspace.CurrentCamera
 
+-- ===== ПРОСТОЕ СОХРАНЕНИЕ НАСТРОЕК ДЛЯ SOLARA =====
+local ConfigFile = "FTAP_Settings.txt" -- Имя файла
+
+-- Загрузка настроек
+if isfile(ConfigFile) then
+    local loaded = HttpService:JSONDecode(readfile(ConfigFile))
+    for category, values in pairs(loaded) do
+        if Settings[category] then
+            for key, value in pairs(values) do
+                Settings[category][key] = value
+            end
+        end
+    end
+    print("[FTAP] Настройки загружены!")
+end
+
+-- Функция сохранения (просто вызови когда нужно)
+local function SaveSettings()
+    writefile(ConfigFile, HttpService:JSONEncode(Settings))
+    print("[FTAP] Настройки сохранены!")
+end
+
+-- Автосохранение при выходе из игры
+game:BindToClose(SaveSettings)
+
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
@@ -16169,18 +16194,5 @@ end})
 infLineSec:Keybind({Text = "Retract (Hold)", Flag = "InfLineRetractKey", Mode = "Hold", Callback = function(held)
     IL.holdRet = held
 end})
--- Этот код автоматически перезапустит скрипт при ошибках
-local function loadScript()
-    local success, err = pcall(function()
-        loadstring(game:HttpGet("https://raw.githubusercontent.com/sharrrrra1/ftap-script/main/EndorisUPD.lua"))()
-    end)
-    if not success then
-        warn("Ошибка загрузки: " .. tostring(err))
-        task.wait(5)
-        loadScript() -- Повторная попытка
-    end
-end
-
-loadScript()
 
 warn("EndorisFTAP Reborn loaded successfully!")
