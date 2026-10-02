@@ -1,5 +1,34 @@
 -- never use a chatgpt obfuscator
 -- никогда не используйте обфускаторы, созданные ии
+--
+-- ============================================================
+--  ВЕРСИЯ: EndorisFTAP Reborn + PERF PASS (02.10.2026)
+--  Эта копия скрипта ОПТИМИЗИРОВАНА по FPS. Функционал не изменён.
+--
+--  КАК ПРОВЕРИТЬ, ЧТО ЗАПУЩЕНА ИМЕННО ЭТА ВЕРСИЯ:
+--   1. В консоли executor'а при загрузке должно появиться:
+--      "EndorisFTAP Reborn loaded successfully! [PERF PASS 02.10.2026]"
+--      Если метки [PERF PASS] нет — запущен СТАРЫЙ файл.
+--   2. Открой файл и найди (Ctrl+F) слово:  PERF PASS
+--      Должно быть 1 совпадение в этой шапке + метки PERF: по коду.
+--
+--  ЧТО ОПТИМИЗИРОВАНО (8 правок):
+--   1) __namecall-хук и RemoteDispatcher: переиспользуемые функции для pcall
+--      (без аллокации замыкания на каждый FireServer/InvokeServer), локальные
+--      алиасы глобалов в самом горячем обработчике игры.
+--   2) Phantom Pallets: кэш потомков паллет вместо GetDescendants() каждый кадр.
+--   3) Highlight Objects: полный обход Slots только по событию (dirty-флаг),
+--      убрана утечка Heartbeat-соединения при повторном включении.
+--   4) Info HUD: .Text обновляется только при изменении строки (лейаут GUI
+--      больше не пересчитывается каждый кадр).
+--   5) ToolInventory: пересчёт подсветки только когда панель видна; убран
+--      дубль CharacterAdded.
+--   6) Слушатель GrabParts: предпроверка флагов, поток не создаётся когда
+--      все grab-функции выключены (раньше — поток на каждый захват любого игрока).
+--   7) Third Person: константная таблица частей тела вместо создания на каждый тик.
+--   8) Исправлен невалидный формат "%.1 FPS" -> "%.1f FPS" (ошибка каждую секунду
+--      при включённом FPS HUD).
+-- ============================================================
 
 local CoreGui = game:GetService("CoreGui")
 local UserInputService = game:GetService("UserInputService")
@@ -355,31 +384,48 @@ RemoteDispatcher._highFreqNames = {
     CreatureGrab = true, CreatureDrop = true, CreatureRelease = true,
 }
 
+-- PERF: переиспользуемые замыкания для pcall и локальные псевдонимы глобалов.
+-- Раньше на КАЖДЫЙ вызов FireServer/InvokeServer создавались новые function-объекты
+-- (мусор для GC на каждом ремоуте). Поведение идентично, аллокаций нет.
+-- Всё обёрнуто в do..end, чтобы не занимать лимит локалок верхнего уровня чанка.
+do
+local _typeof = typeof
+local _tostring = tostring
+local _mathMin = math.min
+local _osClock = os.clock
+local _tableConcat = table.concat
+local _pcall = pcall
+local _unpack = unpack
+local function _getInstanceName(inst) return inst.Name end
+local function _getInstanceFullName(inst) return inst:GetFullName() end
+local function _dispatchFire(item) item.remote:FireServer(_unpack(item.args)) end
+local function _dispatchInvoke(remote, args) return remote:InvokeServer(_unpack(args)) end
+
 function RemoteDispatcher:_makeKey(remote, args)
     local name = remote.Name
     local parts = { name }
-    for i = 1, math.min(#args, 4) do
+    for i = 1, _mathMin(#args, 4) do
         local v = args[i]
-        local t = typeof(v)
+        local t = _typeof(v)
         if t == "Instance" then
-            local ok, fullName = pcall(function() return v:GetFullName() end)
+            local ok, fullName = _pcall(_getInstanceFullName, v)
             parts[i + 1] = ok and fullName or (v.Name or "destroyed")
         elseif t == "Vector3" then
             parts[i + 1] = "V3_" .. v.X .. "_" .. v.Y .. "_" .. v.Z
         elseif t == "CFrame" then
             parts[i + 1] = "CF_" .. v.Position.X .. "_" .. v.Position.Y .. "_" .. v.Position.Z
         else
-            parts[i + 1] = tostring(v)
+            parts[i + 1] = _tostring(v)
         end
     end
-    return table.concat(parts, "|")
+    return _tableConcat(parts, "|")
 end
 
 function RemoteDispatcher:Fire(remote, ...)
     local args = { ... }
     self._stats.totalFires = self._stats.totalFires + 1
     local key = self:_makeKey(remote, args)
-    local now = os.clock()
+    local now = _osClock()
     local existing = self._dedup[key]
     if existing and (now - existing.time) < 0.033 then
         self._stats.deduplicated = self._stats.deduplicated + 1
@@ -406,7 +452,7 @@ function RemoteDispatcher:ProcessFrame()
     local toProcess = math.min(self._pendingCount, baseMax)
     for i = 1, toProcess do
         local item = self._pending[i]
-        local ok, err = pcall(function() item.remote:FireServer(unpack(item.args)) end)
+        local ok, err = _pcall(_dispatchFire, item)
         if not ok then warn("[Dispatcher] FireServer error:", err) end
     end
     local remaining = {}
@@ -421,7 +467,7 @@ end
 function RemoteDispatcher:Invoke(remote, ...)
     self._stats.totalFires = self._stats.totalFires + 1
     local args = { ... }
-    local ok, result = pcall(function() return remote:InvokeServer(unpack(args)) end)
+    local ok, result = _pcall(_dispatchInvoke, remote, args)
     if not ok then warn("[Dispatcher] InvokeServer error:", result) end
     return ok and result
 end
@@ -434,7 +480,7 @@ function RemoteDispatcher:Start()
             self._frameNum = self._frameNum + 1
             self:ProcessFrame()
             if self._dedupCount > 500 then
-                local now = os.clock()
+                local now = _osClock()
                 local cleaned = {}
                 for k, v in pairs(self._dedup) do
                     if (now - v.time) < 1 then
@@ -481,35 +527,44 @@ do
     end
 
     pcall(function()
+        -- PERF: локальные алиасы читаются как upvalue, а не через _ENV,
+        -- на каждом из тысяч namecall-вызовов в кадре это заметно дешевле.
+        local _hookmetamethod = hookmetamethod
+        local _newcclosure = newcclosure
+        local _getnamecallmethod = getnamecallmethod
+        local highFreqNames = RemoteDispatcher._highFreqNames
+        local dispatcher = RemoteDispatcher
+        local stateRef = State
         local oldNamecall
-        oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
-            if RemoteDispatcher._processing then
+        oldNamecall = _hookmetamethod(game, "__namecall", _newcclosure(function(self, ...)
+            if dispatcher._processing then
                 return oldNamecall(self, ...)
             end
-            local method = getnamecallmethod()
+            local method = _getnamecallmethod()
             if method == "FireServer" then
-                if State.isRespawning and not clickAuraEnabled then
-                    local ok, name = pcall(function() return self.Name end)
-                    if ok and RemoteDispatcher._highFreqNames[name] then
+                if stateRef.isRespawning and not clickAuraEnabled then
+                    local ok, name = _pcall(_getInstanceName, self)
+                    if ok and highFreqNames[name] then
                         return nil
                     end
                 end
-                local ok, name = pcall(function() return self.Name end)
-                if ok and RemoteDispatcher._highFreqNames[name] then
-                    RemoteDispatcher:Fire(self, ...)
+                local ok, name = _pcall(_getInstanceName, self)
+                if ok and highFreqNames[name] then
+                    dispatcher:Fire(self, ...)
                     return nil
                 end
             end
             if method == "InvokeServer" then
-                local ok, name = pcall(function() return self.Name end)
-                if ok and RemoteDispatcher._highFreqNames[name] then
-                    return RemoteDispatcher:Invoke(self, ...)
+                local ok, name = _pcall(_getInstanceName, self)
+                if ok and highFreqNames[name] then
+                    return dispatcher:Invoke(self, ...)
                 end
             end
             return oldNamecall(self, ...)
         end))
     end)
 end
+end -- /PERF helpers do..end
 
 local antiExplosionConnection = nil
 local kunaiMessageGui = nil
@@ -2131,6 +2186,9 @@ end
 
 local MiscFeature = {}
 
+-- PERF: константный список частей тела (раньше таблица создавалась заново на каждый тик)
+local THIRD_PERSON_BODY_PARTS = {"Head", "Torso", "UpperTorso", "LowerTorso", "Left Arm", "Right Arm", "Left Leg", "Right Leg", "LeftUpperArm", "LeftLowerArm", "LeftHand", "RightUpperArm", "RightLowerArm", "RightHand", "LeftUpperLeg", "LeftLowerLeg", "LeftFoot", "RightUpperLeg", "RightLowerLeg", "RightFoot"}
+
 function MiscFeature.enableThirdPerson()
     Settings.Misc.ThirdPerson = true
     LocalPlayer.CameraMode = Enum.CameraMode.Classic
@@ -2145,7 +2203,7 @@ function MiscFeature.enableThirdPerson()
         local char = LocalPlayer.Character
         if not char or not char:FindFirstChild("HumanoidRootPart") then return end
 
-        local bodyParts = {"Head", "Torso", "UpperTorso", "LowerTorso", "Left Arm", "Right Arm", "Left Leg", "Right Leg", "LeftUpperArm", "LeftLowerArm", "LeftHand", "RightUpperArm", "RightLowerArm", "RightHand", "LeftUpperLeg", "LeftLowerLeg", "LeftFoot", "RightUpperLeg", "RightLowerLeg", "RightFoot"}
+        local bodyParts = THIRD_PERSON_BODY_PARTS
         for _, name in ipairs(bodyParts) do
             local part = char:FindFirstChild(name)
             if part and part:IsA("BasePart") and part.Transparency > 0 then
@@ -2310,14 +2368,47 @@ function MiscFeature.enablePhantomPallets()
     Settings.Misc.phantomPallets = true
     local PHANTOM_COLOR = Color3.fromRGB(130, 130, 130)
     local PHANTOM_GLOW_COLOR = Color3.fromRGB(160, 165, 180)
+    -- PERF: раньше pallet:GetDescendants() вызывался КАЖДЫЙ Heartbeat для каждой
+    -- паллеты (сотни аллокаций таблиц в секунду). Теперь список потомков кэшируется
+    -- и перестраивается только при реальном добавлении/удалении потомков.
+    State.phantomCache = State.phantomCache or {}
+    local phantomCache = State.phantomCache
+    local function phantomGetDescendants(pallet)
+        local entry = phantomCache[pallet]
+        if not entry then
+            entry = { objs = pallet:GetDescendants(), dirty = false, conns = nil }
+            entry.conns = {
+                pallet.DescendantAdded:Connect(function(d)
+                    -- свой PointLight не считаем изменением структуры
+                    if d.Name ~= "PhantomGlowLight" then entry.dirty = true end
+                end),
+                pallet.DescendantRemoving:Connect(function() entry.dirty = true end),
+            }
+            phantomCache[pallet] = entry
+        end
+        if entry.dirty then
+            entry.dirty = false
+            entry.objs = pallet:GetDescendants()
+        end
+        return entry.objs
+    end
     State.phantomPalletsConn = RunService.Heartbeat:Connect(function()
         if not Settings.Misc.phantomPallets then return end
         local folderName = LocalPlayer.Name .. "SpawnedInToys"
         local toyFolder = Workspace:FindFirstChild(folderName)
+        -- чистим кэш пропавших паллет, чтобы не копить соединения
+        for cachedPallet, entry in pairs(phantomCache) do
+            if not cachedPallet.Parent or (toyFolder and cachedPallet.Parent ~= toyFolder) then
+                if entry.conns then
+                    for _, c in ipairs(entry.conns) do c:Disconnect() end
+                end
+                phantomCache[cachedPallet] = nil
+            end
+        end
         if toyFolder then
             for _, pallet in ipairs(toyFolder:GetChildren()) do
                 if pallet.Name == "PalletLightBrown" then
-                    for _, obj in ipairs(pallet:GetDescendants()) do
+                    for _, obj in ipairs(phantomGetDescendants(pallet)) do
                         if obj:IsA("BasePart") and obj.Transparency ~= 1 then
                             if not obj:GetAttribute("PhantomOrigColor") then
                                 obj:SetAttribute("PhantomOrigColor", obj.Color)
@@ -2355,6 +2446,15 @@ function MiscFeature.disablePhantomPallets()
     if State.phantomPalletsConn then
         State.phantomPalletsConn:Disconnect()
         State.phantomPalletsConn = nil
+    end
+    -- сбрасываем кэш потомков и его соединения
+    if State.phantomCache then
+        for _, entry in pairs(State.phantomCache) do
+            if entry.conns then
+                for _, c in ipairs(entry.conns) do c:Disconnect() end
+            end
+        end
+        State.phantomCache = {}
     end
     local folderName = LocalPlayer.Name .. "SpawnedInToys"
     local toyFolder = Workspace:FindFirstChild(folderName)
@@ -7107,6 +7207,13 @@ end})
 miscOtherSec:Toggle({Text = "Highlight Objects", Flag = "HighlightObjects", Default = false, Callback = function(state)
     Settings.Misc.highlightObjects = state
     if not state then
+        -- снимаем вотчеры и старый heartbeat (раньше соединение утекало при каждом toggle)
+        if State.highlightObjectsConn then State.highlightObjectsConn:Disconnect() State.highlightObjectsConn = nil end
+        if State.highlightObjectsWatchConns then
+            for _, c in ipairs(State.highlightObjectsWatchConns) do c:Disconnect() end
+            State.highlightObjectsWatchConns = nil
+        end
+        State.highlightObjectsDirty = nil
         for _, obj in pairs(workspace:GetDescendants()) do
             local hl = obj:FindFirstChild("HighlightObj_HL")
             if hl then hl:Destroy() end
@@ -7167,8 +7274,36 @@ miscOtherSec:Toggle({Text = "Highlight Objects", Flag = "HighlightObjects", Defa
     end
     for _, target in ipairs(HighlightTargets) do highlightByPath(target.path, target.color) end
     highlightBodies()
+    -- PERF: раньше highlightBodies() (полный обход Slots:GetDescendants()) выполнялся
+    -- КАЖДЫЙ Heartbeat. Теперь полный проход делается только когда что-то реально
+    -- добавилось/удалилось в папке Slots.Slots (событийный dirty-флаг), либо когда
+    -- папка ещё не появилась (старое поведение опроса сохранено).
+    State.highlightObjectsDirty = false
+    local function watchHighlightSlots()
+        if State.highlightObjectsWatchConns then return end
+        local slots1 = workspace:FindFirstChild("Slots")
+        local slots2 = slots1 and slots1:FindFirstChild("Slots")
+        if not slots2 then return end
+        State.highlightObjectsWatchConns = {
+            slots2.DescendantAdded:Connect(function() State.highlightObjectsDirty = true end),
+            slots2.DescendantRemoving:Connect(function() State.highlightObjectsDirty = true end),
+        }
+    end
+    watchHighlightSlots()
+    if State.highlightObjectsConn then State.highlightObjectsConn:Disconnect() end
     State.highlightObjectsConn = RunService.Heartbeat:Connect(function()
         if not Settings.Misc.highlightObjects then return end
+        if not State.highlightObjectsWatchConns then
+            watchHighlightSlots()
+            if not State.highlightObjectsWatchConns then
+                -- папка Slots ещё не создана игрой: опрашиваем каждый кадр, как раньше
+                highlightBodies()
+                return
+            end
+            State.highlightObjectsDirty = true
+        end
+        if not State.highlightObjectsDirty then return end
+        State.highlightObjectsDirty = false
         highlightBodies()
     end)
 end})
@@ -9909,7 +10044,9 @@ RunService.Heartbeat:Connect(function(dt)
     windowTime = windowTime + dt
     if windowTime >= 1 then
         if Settings.Misc.fpsHud then
-            fpsLabel.Text = string.format("%.1 FPS", frameCount / windowTime)
+            -- исправлен невалидный формат("%.1" -> "%.1f"): старый вариант
+            -- выбрасывал ошибку string.format каждую секунду при включённом HUD
+            fpsLabel.Text = string.format("%.1f FPS", frameCount / windowTime)
         end
         frameCount = 0
         windowTime = 0
@@ -10012,21 +10149,36 @@ local function hookChatDetection()
 end
 hookChatDetection()
 
+-- PERF: текст на лейблах обновляется только при реальном изменении строки —
+-- присваивание .Text каждый Heartbeat заставляет движок пересчитывать лейаут GUI.
+local infoHudCache = { players = nil, playtime = nil, uptime = nil }
 RunService.Heartbeat:Connect(function()
     if not infoFrame.Visible then return end
-    infoPlayers.Text = "Players: " .. tostring(#Players:GetPlayers())
+    local playersText = "Players: " .. tostring(#Players:GetPlayers())
+    if playersText ~= infoHudCache.players then
+        infoHudCache.players = playersText
+        infoPlayers.Text = playersText
+    end
 
     local sessionSec = os.time() - infoHudStart
     local sH = math.floor(sessionSec / 3600)
     local sM = math.floor((sessionSec % 3600) / 60)
     local sS = sessionSec % 60
-    infoPlaytime.Text = string.format("Session: %02dh %02dm %02ds", sH, sM, sS)
+    local playtimeText = string.format("Session: %02dh %02dm %02ds", sH, sM, sS)
+    if playtimeText ~= infoHudCache.playtime then
+        infoHudCache.playtime = playtimeText
+        infoPlaytime.Text = playtimeText
+    end
 
     local serverSec = math.floor(Workspace.DistributedGameTime)
     local uH = math.floor(serverSec / 3600)
     local uM = math.floor((serverSec % 3600) / 60)
     local uS = serverSec % 60
-    infoUptime.Text = string.format("%02dh %02dm %02ds", uH, uM, uS)
+    local uptimeText = string.format("%02dh %02dm %02ds", uH, uM, uS)
+    if uptimeText ~= infoHudCache.uptime then
+        infoHudCache.uptime = uptimeText
+        infoUptime.Text = uptimeText
+    end
 end)
 
 Settings.Misc.infoHud = false
@@ -11195,6 +11347,16 @@ end
 
 Workspace.ChildAdded:Connect(function(child)
     if child.Name == "GrabParts" then
+        -- PERF: GrabParts появляется при КАЖДОМ захвате ЛЮБОГО игрока на сервере.
+        -- Раньше на каждое появление создавался поток с WaitForChild(..., 8) даже
+        -- когда ни одна grab-функция не включена и обработчики всё равно сразу выходят.
+        -- Предпроверка в точности повторяет условия внутри обработчиков.
+        local G = Settings.Grab
+        if not (G.EnableThrowStrength or G.VoidGrab or G.NoclipGrab or G.SkyGrab
+            or G.SpinGrab or G.FlingGrab
+            or (Settings.Telekinesis.grabToysFly and Settings.Telekinesis.Enabled)) then
+            return
+        end
         task.spawn(function()
             GrabFeature.onGrabPartAdded_ThrowStrength(child)
             GrabFeature.onGrabPartsAdded_FTAP(child)
@@ -14083,15 +14245,20 @@ do
     LocalPlayer.Backpack.ChildAdded:Connect(scoUpdateInventory)
     LocalPlayer.Backpack.ChildRemoved:Connect(scoUpdateInventory)
 
+    -- второе подключение CharacterAdded здесь было дублем и создавало
+    -- двойные ChildAdded-хендлеры на каждом респавне — убрано.
     if LocalPlayer.Character then
         scoSetupCharacter(LocalPlayer.Character)
-    else
-        LocalPlayer.CharacterAdded:Connect(scoSetupCharacter)
     end
     scoUpdateInventory()
     Settings.Misc.refreshToolList = scoUpdateInventory
 
     RunService.Heartbeat:Connect(function()
+        -- PERF: подсветка слотов нужна только когда панель инвентаря видна;
+        -- при включении панели scoUpdateInventory() и так вызывает scoUpdateHighlight().
+        local gui = PlayerGui:FindFirstChild("ToolInventory")
+        local mf = gui and gui:FindFirstChild("MainFrame")
+        if not mf or not mf.Visible then return end
         scoUpdateHighlight()
     end)
 end
@@ -16226,4 +16393,4 @@ infLineSec:Keybind({Text = "Retract (Hold)", Flag = "InfLineRetractKey", Mode = 
     IL.holdRet = held
 end})
 
-warn("EndorisFTAP Reborn loaded successfully!")
+warn("EndorisFTAP Reborn loaded successfully! [PERF PASS 02.10.2026]")
