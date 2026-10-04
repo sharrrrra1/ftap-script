@@ -116,11 +116,29 @@ end
 local libSource = game:HttpGet("https://raw.githubusercontent.com/marshelx/endoris/refs/heads/main/library.lua")
 local pos = libSource:find("local library")
 if pos then libSource = libSource:sub(1, pos - 1) .. "library" .. libSource:sub(pos + #"local library") end
+if type(loadstring) ~= "function" then
+    warn("Solara: loadstring недоступен")
+    return
+end
+
 local func, err = loadstring(libSource)
-if not func then warn("loadstring: " .. tostring(err)) return end
+
+if type(func) ~= "function" then
+    warn("Ошибка компиляции library.lua: " .. tostring(err))
+    return
+end
+
 local ok, runErr = pcall(func)
-if not ok then warn("runtime: " .. tostring(runErr)) return end
-if not library then warn("library is nil") return end
+
+if not ok then
+    warn("Ошибка выполнения library.lua: " .. tostring(runErr))
+    return
+end
+
+if type(library) ~= "table" then
+    warn("library не создалась")
+    return
+end
 
 local function fixSectionAfterRefresh()
     task.delay(0.2, function()
