@@ -4,6 +4,7 @@
 -- ============================================================
 --  ВЕРСИЯ: EndorisFTAP Reborn + PERF PASS (02.10.2026)
 --  Эта копия скрипта ОПТИМИЗИРОВАНА по FPS. Функционал не изменён.
+--  Добавлены фиксы Legit Aim / Silent Aim / Infinity Line.
 --
 --  КАК ПРОВЕРИТЬ, ЧТО ЗАПУЩЕНА ИМЕННО ЭТА ВЕРСИЯ:
 --   1. В консоли executor'а при загрузке должно появиться:
@@ -110,22 +111,6 @@ end
 if UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled then
     LocalPlayer:Kick("Script not for phone")
     return
-end
-
-do
-    local execName = nil
-    if getexecutorname then
-        execName = getexecutorname()
-    elseif identifyexecutor then
-        execName = identifyexecutor()
-    end
-    if execName then
-        execName = execName:lower()
-        if execName:find("xeno") or execName:find("jjsploit") then
-            LocalPlayer:Kick("Executor not supported. Try use Solara or other")
-            return
-        end
-    end
 end
 
 local libSource = game:HttpGet("https://raw.githubusercontent.com/marshelx/endoris/refs/heads/main/library.lua")
@@ -334,7 +319,7 @@ local State = {
     timers = { AntiBananaTimer = 0, LastUpdate = 0, UPDATE_INTERVAL = 0.03, espTimer = 0 },
     IsCharacterInRagdoll = false, Root = nil, HRPs = {}, LastGrabbedTarget = nil,
     snowballRagdollActive = false, snowballRagdollTask = nil, snowballTarget = nil,
-    CameraClone = nil, CameraInitialized = false,
+    CameraClone = nil, CameraReal = nil, CameraInitialized = false, _silentCamFixT = 0,
     noclipRunning = false, noclipTrackedParts = {},
     pcldConn = nil, pcldParts = nil, pcldTime = 0,
     antiKillSpamConnection = nil, antiKillIsHolding = false, antiKillLastActionTime = 0,
@@ -10700,6 +10685,23 @@ do
     local savedRotCF = nil
     local isLocking = false
 
+    -- FIX(silent-aim): recreate the camera clone after respawn/anti-cheat resets it.
+    local function silentCamInit(srcCam)
+        local ok = pcall(function()
+            local liveCam = srcCam or workspace.CurrentCamera
+            if not liveCam then return end
+            local clone = liveCam:Clone()
+            clone.Name = "SilentCamera"
+            clone.CFrame = liveCam.CFrame
+            clone.Parent = workspace
+            workspace.CurrentCamera = clone
+            State.CameraClone = clone
+            State.CameraReal = liveCam
+            State.CameraInitialized = true
+        end)
+        return ok and State.CameraClone and State.CameraClone.Parent
+    end
+
     local function isRotateVisible()
         local ok, result = pcall(function()
             local pg = LocalPlayer:FindFirstChild("PlayerGui")
@@ -10717,6 +10719,18 @@ do
 
     RunService.RenderStepped:Connect(function()
         if not State.CameraInitialized or not State.CameraClone then return end
+
+        -- FIX(silent-aim): watchdog with a 0.5 second rate limit.
+        local liveCam = workspace.CurrentCamera
+        if liveCam ~= State.CameraClone or not State.CameraClone.Parent then
+            local now = tick()
+            if now - (State._silentCamFixT or 0) >= 0.5 then
+                State._silentCamFixT = now
+                silentCamInit(liveCam)
+            end
+            if not State.CameraClone or not State.CameraClone.Parent or workspace.CurrentCamera ~= State.CameraClone then return end
+        end
+        local realCam = State.CameraReal or Camera
 
         local shouldLock = isRotateVisible()
 
@@ -10736,13 +10750,13 @@ do
         end
 
         if not Settings.PvP.SilentAimEnabled then
-            Camera.CFrame = State.CameraClone.CFrame
+            realCam.CFrame = State.CameraClone.CFrame
             return
         end
 
         if Settings.PvP.SilentAimKeybindMode then
             if not Settings.PvP.SilentAimKeybindHeld then
-                Camera.CFrame = State.CameraClone.CFrame
+                realCam.CFrame = State.CameraClone.CFrame
                 return
             end
         end
@@ -10750,7 +10764,7 @@ do
         local TargetCFrame = State.CameraClone.CFrame
 
         if not workspace:FindFirstChild("GrabParts") then
-            local Center = Camera.ViewportSize / 2
+            local Center = realCam.ViewportSize / 2
             local halfDiag = Center.Magnitude
             local AdjustedStrength = (Settings.PvP.SilentAimStrength / 200) * halfDiag
             local bestDist = math.huge
@@ -10827,7 +10841,7 @@ do
             end
         end
 
-        Camera.CFrame = TargetCFrame
+        realCam.CFrame = TargetCFrame
     end)
 
     
@@ -10884,6 +10898,15 @@ end
 local LegitAimFeature = {}
 LegitAimFeature.Connection = nil
 LegitAimFeature.SelectedLimb = nil
+-- FIX(legit-aim): keep the selected character and its selected limb together.
+LegitAimFeature.LockedChar = nil
+LegitAimFeature.LimbChar = nil
+
+local function LegitAim_charValid(char)
+    if not (char and char:IsA("Model") and char.Parent) then return false end
+    local hum = char:FindFirstChildWhichIsA("Humanoid")
+    return hum and hum.Health > 0
+end
 
 function LegitAimFeature.getNearestPlayer()
     local myRoot = State.Root
@@ -10897,6 +10920,11 @@ function LegitAimFeature.getNearestPlayer()
     local cam = workspace.CurrentCamera
     if not cam then return nil end
     local screenCenter = cam.ViewportSize / 2
+    -- FIX(legit-aim): cache visibility raycast parameters outside candidate loop.
+    if not LegitAimFeature._visRP then
+        LegitAimFeature._visRP = RaycastParams.new()
+        LegitAimFeature._visRP.FilterType = Enum.RaycastFilterType.Exclude
+    end
     for _, otherPlayer in ipairs(Players:GetPlayers()) do
         if otherPlayer ~= LocalPlayer then
             if Settings.PvP.LegitAimIgnoreFriends then
@@ -10912,8 +10940,7 @@ function LegitAimFeature.getNearestPlayer()
                     if Settings.PvP.LegitAimVisible then
                         local origin = myRoot.Position
                         local dir = (otherRoot.Position - origin)
-                        local rp = RaycastParams.new()
-                        rp.FilterType = Enum.RaycastFilterType.Exclude
+                        local rp = LegitAimFeature._visRP
                         local exclude = {}
                         if LocalPlayer.Character then table.insert(exclude, LocalPlayer.Character) end
                         if otherChar then table.insert(exclude, otherChar) end
@@ -11047,7 +11074,33 @@ function LegitAimFeature.pickLimb(char)
 end
 
 function LegitAimFeature.getAimTarget()
-    local char = LegitAimFeature.getNearestPlayer()
+    -- FIX(legit-aim): crosshair hysteresis prevents switching between nearby players.
+    local char = nil
+    if Settings.PvP.LegitAimMode == "Crosshair" and LegitAim_charValid(LegitAimFeature.LockedChar) then
+        local lockedLimb = LegitAimFeature.SelectedLimb
+        if LegitAimFeature.LimbChar ~= LegitAimFeature.LockedChar or not (lockedLimb and lockedLimb.Parent) then
+            lockedLimb = LegitAimFeature.pickLimb(LegitAimFeature.LockedChar)
+            LegitAimFeature.SelectedLimb = lockedLimb
+            LegitAimFeature.LimbChar = LegitAimFeature.LockedChar
+        end
+        local cam = workspace.CurrentCamera
+        if cam and lockedLimb and lockedLimb.Parent then
+            local sp, onScreen = cam:WorldToScreenPoint(lockedLimb.Position)
+            local center = cam.ViewportSize / 2
+            local dist = (Vector2.new(sp.X, sp.Y) - center).Magnitude
+            if onScreen and dist <= 450 then
+                char = LegitAimFeature.LockedChar
+            end
+        end
+    end
+    if not char then
+        char = LegitAimFeature.getNearestPlayer()
+        LegitAimFeature.LockedChar = char
+        if char ~= LegitAimFeature.LimbChar then
+            LegitAimFeature.SelectedLimb = nil
+            LegitAimFeature.LimbChar = char
+        end
+    end
     if not char then return nil end
     if not Settings.PvP.LegitAimUnsafe then
         local hitbox = Settings.PvP.LegitAimHitbox or "Body"
@@ -11066,19 +11119,24 @@ function LegitAimFeature.getAimTarget()
         end
         return char:FindFirstChild("HumanoidRootPart")
     end
-    if LegitAimFeature.SelectedLimb and LegitAimFeature.SelectedLimb.Parent then
+    if LegitAimFeature.SelectedLimb and LegitAimFeature.SelectedLimb.Parent and LegitAimFeature.LimbChar == char then
         return LegitAimFeature.SelectedLimb
     end
     LegitAimFeature.SelectedLimb = LegitAimFeature.pickLimb(char)
+    LegitAimFeature.LimbChar = char
     return LegitAimFeature.SelectedLimb
 end
 
 function LegitAimFeature.Start()
     if LegitAimFeature.Connection then return end
-    LegitAimFeature.Connection = RunService.RenderStepped:Connect(function()
+    -- FIX(legit-aim): run after the Roblox camera update.
+    pcall(function() RunService:UnbindFromRenderStep("LegitAimStep") end)
+    RunService:BindToRenderStep("LegitAimStep", Enum.RenderPriority.Camera.Value + 1, function(dt)
         if not Settings.PvP.LegitAimEnabled then return end
         if not Settings.PvP.LegitAimHolding then
             LegitAimFeature.SelectedLimb = nil
+            LegitAimFeature.LockedChar = nil
+            LegitAimFeature.LimbChar = nil
             return
         end
         local myRoot = State.Root
@@ -11093,17 +11151,23 @@ function LegitAimFeature.Start()
             local cam = workspace.CurrentCamera
             if not cam then return end
             local camPos = cam.CFrame.Position
+            local toTarget = target.Position - camPos
+            -- FIX(legit-aim): avoid CFrame.lookAt NaN when the camera is inside the target.
+            if toTarget.Magnitude < 0.05 then return end
             if Settings.PvP.LegitAimSmooth then
-                local targetDir = (target.Position - camPos).Unit
+                local targetDir = toTarget.Unit
                 local currentLook = cam.CFrame.LookVector
-                local factor = math.min(1, 2.5 / Settings.PvP.LegitAimSmoothness)
-                local newLook = (currentLook + (targetDir - currentLook) * factor).Unit
+                local alpha = math.clamp(dt * 150 / math.max(Settings.PvP.LegitAimSmoothness, 0.1), 0, 1)
+                local newLook = (currentLook + (targetDir - currentLook) * alpha).Unit
                 cam.CFrame = CFrame.lookAt(camPos, camPos + newLook)
             else
                 cam.CFrame = CFrame.lookAt(camPos, target.Position)
             end
         end
     end)
+    LegitAimFeature.Connection = { Disconnect = function()
+        pcall(function() RunService:UnbindFromRenderStep("LegitAimStep") end)
+    end }
 end
 
 function LegitAimFeature.Stop()
@@ -11677,6 +11741,7 @@ local mainAimSec = MainTab:Section({Text = "Aim", Side = "Right"})
 mainAimSec:Toggle({Text = "Silent Aim", Flag = "SilentAim", Default = false, Callback = function(v)
     Settings.PvP.SilentAimEnabled = v
     if v and not State.CameraInitialized then
+        State.CameraReal = Camera -- FIX(silent-aim): keep the live camera reference.
         State.CameraClone = Camera:Clone()
         State.CameraClone.Parent = workspace
         State.CameraClone.Name = "SilentCamera"
@@ -16280,6 +16345,21 @@ local function ilStep(dt)
         else
             ilBoost(model)
         end
+    end
+
+    -- FIX(inf-line): the same GrabParts model may recreate its drag parts/attachments.
+    local stale = not IL.primary
+    if not stale then
+        stale = not IL.primary.part or not IL.primary.part.Parent
+            or not IL.primary.attach or not IL.primary.attach.Parent
+    end
+    if not stale and IL.secondary then
+        stale = not IL.secondary.part or not IL.secondary.part.Parent
+            or not IL.secondary.attach or not IL.secondary.attach.Parent
+    end
+    if stale then
+        ilScan(model)
+        ilBoost(model)
     end
 
     if not model or not IL.primary then return end
