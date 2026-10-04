@@ -1221,7 +1221,16 @@ function AntiFeature.stopAntiBlobmanKill()
 end
 
 function AntiFeature.startFightBack()
-    if State.fightBackConn then State.fightBackConn:Disconnect() end
+    if State.fightBackConn then
+        if type(State.fightBackConn) == "thread" then
+            pcall(function() task.cancel(State.fightBackConn) end)
+        elseif type(State.fightBackConn) == "table" or typeof(State.fightBackConn) == "RBXScriptConnection" then
+            if type(State.fightBackConn.Disconnect) == "function" then
+                pcall(function() State.fightBackConn:Disconnect() end)
+            end
+        end
+        State.fightBackConn = nil
+    end
     State.fightBackConn = task.spawn(function()
         while Settings.Anti.FightBack do
             local char = LocalPlayer.Character
@@ -1259,7 +1268,16 @@ end
 
 function AntiFeature.stopFightBack()
     Settings.Anti.FightBack = false
-    State.fightBackConn = nil
+    if State.fightBackConn then
+        if type(State.fightBackConn) == "thread" then
+            pcall(function() task.cancel(State.fightBackConn) end)
+        elseif type(State.fightBackConn) == "table" or typeof(State.fightBackConn) == "RBXScriptConnection" then
+            if type(State.fightBackConn.Disconnect) == "function" then
+                pcall(function() State.fightBackConn:Disconnect() end)
+            end
+        end
+        State.fightBackConn = nil
+    end
 end
 
 function AntiFeature.startHouseTpAntiGrab()
@@ -10915,7 +10933,9 @@ end
 
 local LegitAimFeature = {}
 LegitAimFeature.Connection = nil
+LegitAimFeature.ConnectionMode = nil
 LegitAimFeature.SelectedLimb = nil
+LegitAimFeature._backendLogged = false
 -- FIX(legit-aim): keep the selected character and its selected limb together.
 LegitAimFeature.LockedChar = nil
 LegitAimFeature.LimbChar = nil
@@ -11146,9 +11166,8 @@ function LegitAimFeature.getAimTarget()
 end
 
 function LegitAimFeature.Start()
-    if LegitAimFeature.Connection then return end
+    if LegitAimFeature.ConnectionMode ~= nil or LegitAimFeature.Connection ~= nil then return end
     -- FIX(legit-aim): run after the Roblox camera update.
-    pcall(function() RunService:UnbindFromRenderStep("LegitAimStep") end)
     local function LegitAimStep(dt)
         if not Settings.PvP.LegitAimEnabled then return end
         if not Settings.PvP.LegitAimHolding then
@@ -11183,21 +11202,62 @@ function LegitAimFeature.Start()
             end
         end
     end
+
+    local bound = false
     if type(RunService.BindToRenderStep) == "function" then
-        RunService:BindToRenderStep("LegitAimStep", Enum.RenderPriority.Camera.Value + 1, LegitAimStep)
-        LegitAimFeature.Connection = { Disconnect = function()
-            pcall(function() RunService:UnbindFromRenderStep("LegitAimStep") end)
-        end }
-    else
-        LegitAimFeature.Connection = RunService.RenderStepped:Connect(LegitAimStep)
+        local ok = pcall(function()
+            RunService:BindToRenderStep("LegitAimStep", Enum.RenderPriority.Camera.Value + 1, LegitAimStep)
+        end)
+        if ok then
+            bound = true
+            LegitAimFeature.ConnectionMode = "bind"
+            LegitAimFeature.Connection = nil
+            if not LegitAimFeature._backendLogged then
+                LegitAimFeature._backendLogged = true
+                warn("[LegitAim] render backend: BindToRenderStep")
+            end
+        else
+            if type(RunService.UnbindFromRenderStep) == "function" then
+                pcall(function() RunService:UnbindFromRenderStep("LegitAimStep") end)
+            end
+        end
+    end
+
+    if not bound then
+        local conn = nil
+        local ok = pcall(function()
+            conn = RunService.RenderStepped:Connect(LegitAimStep)
+        end)
+        if ok and conn then
+            LegitAimFeature.ConnectionMode = "signal"
+            LegitAimFeature.Connection = conn
+            if not LegitAimFeature._backendLogged then
+                LegitAimFeature._backendLogged = true
+                warn("[LegitAim] render backend: RenderStepped")
+            end
+        else
+            LegitAimFeature.ConnectionMode = nil
+            LegitAimFeature.Connection = nil
+        end
     end
 end
 
 function LegitAimFeature.Stop()
-    if LegitAimFeature.Connection then
-        LegitAimFeature.Connection:Disconnect()
-        LegitAimFeature.Connection = nil
+    if LegitAimFeature.ConnectionMode == "bind" then
+        if type(RunService.UnbindFromRenderStep) == "function" then
+            pcall(function() RunService:UnbindFromRenderStep("LegitAimStep") end)
+        end
+    elseif LegitAimFeature.ConnectionMode == "signal" or LegitAimFeature.Connection then
+        local conn = LegitAimFeature.Connection
+        if conn and type(conn.Disconnect) == "function" then
+            pcall(function() conn:Disconnect() end)
+        end
     end
+    LegitAimFeature.ConnectionMode = nil
+    LegitAimFeature.Connection = nil
+    LegitAimFeature.SelectedLimb = nil
+    LegitAimFeature.LockedChar = nil
+    LegitAimFeature.LimbChar = nil
 end
 
 LegitAimFeature.Start()
@@ -13866,7 +13926,16 @@ end})
 
 playerJumpSec:Toggle({Text = "Auto wall-climb", Flag = "PlayerWallClimb", Default = false, Callback = function(v)
     Settings.Player.wallClimb = v
-    if playerConnections.WC then playerConnections.WC:Disconnect() end
+    if playerConnections.WC then
+        if type(playerConnections.WC) == "thread" then
+            pcall(function() task.cancel(playerConnections.WC) end)
+        elseif type(playerConnections.WC) == "table" or typeof(playerConnections.WC) == "RBXScriptConnection" then
+            if type(playerConnections.WC.Disconnect) == "function" then
+                pcall(function() playerConnections.WC:Disconnect() end)
+            end
+        end
+        playerConnections.WC = nil
+    end
     if v then
         playerConnections.WC = task.spawn(function()
             while Settings.Player.wallClimb do
@@ -13899,8 +13968,11 @@ playerGravitySec:Slider({Text = "Gravity", Flag = "PlayerGravityValue", Minimum 
 end})
 playerGravitySec:Toggle({Text = "Apply Gravity", Flag = "PlayerApplyGravity", Default = false, Callback = function(v)
     Settings.Player.applyGravity = v
+    if playerConnections.GR then
+        pcall(function() task.cancel(playerConnections.GR) end)
+        playerConnections.GR = nil
+    end
     if v then
-        if playerConnections.GR then task.cancel(playerConnections.GR) end
         playerConnections.GR = task.spawn(function()
             while Settings.Player.applyGravity do
                 Workspace.Gravity = Settings.Player.gravityValue
@@ -16241,7 +16313,7 @@ State.infLine = State.infLine or {
     holdExt = false, holdRet = false,
     grabModel = nil, primary = nil, secondary = nil,
     saved = {}, smoothLook = nil,
-    scrollConn = nil, renderConn = nil, bound = false,
+    scrollConn = nil, renderConn = nil, renderMode = nil, bound = false,
 }
 local IL = State.infLine
 
@@ -16433,33 +16505,89 @@ local function ilStep(dt)
 end
 
 local function ilStart()
-    if IL.bound or IL.renderConn then return end
+    if IL.bound or IL.renderConn or IL.renderMode then return end
+
+    local bound = false
     if type(RunService.BindToRenderStep) == "function" then
-        RunService:BindToRenderStep("InfinityLineStep", Enum.RenderPriority.Camera.Value + 1, ilStep)
-    else
-        IL.renderConn = RunService.RenderStepped:Connect(ilStep)
+        local ok = pcall(function()
+            RunService:BindToRenderStep("InfinityLineStep", Enum.RenderPriority.Camera.Value + 1, ilStep)
+        end)
+        if ok then
+            bound = true
+            IL.renderMode = "bind"
+            IL.bound = true
+            IL.renderConn = nil
+            if not IL._backendLogged then
+                IL._backendLogged = true
+                warn("[InfinityLine] render backend: BindToRenderStep")
+            end
+        else
+            if type(RunService.UnbindFromRenderStep) == "function" then
+                pcall(function() RunService:UnbindFromRenderStep("InfinityLineStep") end)
+            end
+        end
     end
-    IL.bound = true
+
+    if not bound then
+        local conn = nil
+        local ok = pcall(function()
+            conn = RunService.RenderStepped:Connect(ilStep)
+        end)
+        if ok and conn then
+            IL.renderMode = "signal"
+            IL.bound = true
+            IL.renderConn = conn
+            if not IL._backendLogged then
+                IL._backendLogged = true
+                warn("[InfinityLine] render backend: RenderStepped")
+            end
+        else
+            IL.renderMode = nil
+            IL.bound = false
+            IL.renderConn = nil
+            return
+        end
+    end
+
     -- Скролл работает ТОЛЬКО во время захвата и ТОЛЬКО при скорости > 0
-    IL.scrollConn = UserInputService.InputChanged:Connect(function(input)
-        if not Settings.Grab.InfinityLine then return end
-        if input.UserInputType ~= Enum.UserInputType.MouseWheel then return end
-        local speed = ilEaseSpeed(Settings.Grab.InfinityLineScrollSpeed)
-        if speed <= 0 then return end -- 0 = "скрипта нет", колесо не трогает линию
-        if not Workspace:FindFirstChild("GrabParts") then return end
-        IL.offset = IL.offset + input.Position.Z * speed
+    if IL.scrollConn and type(IL.scrollConn.Disconnect) == "function" then
+        pcall(function() IL.scrollConn:Disconnect() end)
+        IL.scrollConn = nil
+    end
+    local okScroll, sConn = pcall(function()
+        return UserInputService.InputChanged:Connect(function(input)
+            if not Settings.Grab.InfinityLine then return end
+            if input.UserInputType ~= Enum.UserInputType.MouseWheel then return end
+            local speed = ilEaseSpeed(Settings.Grab.InfinityLineScrollSpeed)
+            if speed <= 0 then return end -- 0 = "скрипта нет", колесо не трогает линию
+            if not Workspace:FindFirstChild("GrabParts") then return end
+            IL.offset = IL.offset + input.Position.Z * speed
+        end)
     end)
+    if okScroll and sConn then
+        IL.scrollConn = sConn
+    end
 end
 
 local function ilStop()
-    if IL.renderConn then
-        IL.renderConn:Disconnect()
-        IL.renderConn = nil
-    elseif IL.bound then
-        pcall(function() RunService:UnbindFromRenderStep("InfinityLineStep") end)
+    if IL.renderMode == "bind" then
+        if type(RunService.UnbindFromRenderStep) == "function" then
+            pcall(function() RunService:UnbindFromRenderStep("InfinityLineStep") end)
+        end
+    elseif IL.renderMode == "signal" or IL.renderConn then
+        local conn = IL.renderConn
+        if conn and type(conn.Disconnect) == "function" then
+            pcall(function() conn:Disconnect() end)
+        end
     end
+    IL.renderMode = nil
+    IL.renderConn = nil
     IL.bound = false
-    if IL.scrollConn then IL.scrollConn:Disconnect() IL.scrollConn = nil end
+
+    if IL.scrollConn and type(IL.scrollConn.Disconnect) == "function" then
+        pcall(function() IL.scrollConn:Disconnect() end)
+        IL.scrollConn = nil
+    end
     ilRestore()
     IL.grabModel = nil
     IL.primary, IL.secondary = nil, nil
@@ -16468,12 +16596,19 @@ local function ilStop()
     IL.holdExt, IL.holdRet = false, false
 end
 
--- Страховка от старого бинда после повторного запуска скрипта
-if IL.renderConn then
-    IL.renderConn:Disconnect()
+-- Страховка от старых соединений после повторного запуска скрипта
+if IL.renderConn and type(IL.renderConn.Disconnect) == "function" then
+    pcall(function() IL.renderConn:Disconnect() end)
     IL.renderConn = nil
 end
-pcall(function() RunService:UnbindFromRenderStep("InfinityLineStep") end)
+if IL.scrollConn and type(IL.scrollConn.Disconnect) == "function" then
+    pcall(function() IL.scrollConn:Disconnect() end)
+    IL.scrollConn = nil
+end
+if IL.renderMode == "bind" and type(RunService.UnbindFromRenderStep) == "function" then
+    pcall(function() RunService:UnbindFromRenderStep("InfinityLineStep") end)
+end
+IL.renderMode = nil
 IL.bound = false
 
 -- ============================ UI ============================
