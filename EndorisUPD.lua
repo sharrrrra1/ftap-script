@@ -48,7 +48,7 @@ local Camera = Workspace.CurrentCamera
 local ConfigFile = "FTAP_Settings.txt"
 
 -- Загрузка настроек
-if isfile(ConfigFile) then
+if type(isfile) == "function" and isfile(ConfigFile) then
     local ok, data = pcall(function()
         return HttpService:JSONDecode(readfile(ConfigFile))
     end)
