@@ -11149,7 +11149,7 @@ function LegitAimFeature.Start()
     if LegitAimFeature.Connection then return end
     -- FIX(legit-aim): run after the Roblox camera update.
     pcall(function() RunService:UnbindFromRenderStep("LegitAimStep") end)
-    RunService:BindToRenderStep("LegitAimStep", Enum.RenderPriority.Camera.Value + 1, function(dt)
+    local function LegitAimStep(dt)
         if not Settings.PvP.LegitAimEnabled then return end
         if not Settings.PvP.LegitAimHolding then
             LegitAimFeature.SelectedLimb = nil
@@ -11182,10 +11182,15 @@ function LegitAimFeature.Start()
                 cam.CFrame = CFrame.lookAt(camPos, target.Position)
             end
         end
-    end)
-    LegitAimFeature.Connection = { Disconnect = function()
-        pcall(function() RunService:UnbindFromRenderStep("LegitAimStep") end)
-    end }
+    end
+    if type(RunService.BindToRenderStep) == "function" then
+        RunService:BindToRenderStep("LegitAimStep", Enum.RenderPriority.Camera.Value + 1, LegitAimStep)
+        LegitAimFeature.Connection = { Disconnect = function()
+            pcall(function() RunService:UnbindFromRenderStep("LegitAimStep") end)
+        end }
+    else
+        LegitAimFeature.Connection = RunService.RenderStepped:Connect(LegitAimStep)
+    end
 end
 
 function LegitAimFeature.Stop()
@@ -16236,7 +16241,7 @@ State.infLine = State.infLine or {
     holdExt = false, holdRet = false,
     grabModel = nil, primary = nil, secondary = nil,
     saved = {}, smoothLook = nil,
-    scrollConn = nil, bound = false,
+    scrollConn = nil, renderConn = nil, bound = false,
 }
 local IL = State.infLine
 
@@ -16428,9 +16433,13 @@ local function ilStep(dt)
 end
 
 local function ilStart()
-    if IL.bound then return end
+    if IL.bound or IL.renderConn then return end
+    if type(RunService.BindToRenderStep) == "function" then
+        RunService:BindToRenderStep("InfinityLineStep", Enum.RenderPriority.Camera.Value + 1, ilStep)
+    else
+        IL.renderConn = RunService.RenderStepped:Connect(ilStep)
+    end
     IL.bound = true
-    RunService:BindToRenderStep("InfinityLineStep", Enum.RenderPriority.Camera.Value + 1, ilStep)
     -- Скролл работает ТОЛЬКО во время захвата и ТОЛЬКО при скорости > 0
     IL.scrollConn = UserInputService.InputChanged:Connect(function(input)
         if not Settings.Grab.InfinityLine then return end
@@ -16443,10 +16452,13 @@ local function ilStart()
 end
 
 local function ilStop()
-    if IL.bound then
+    if IL.renderConn then
+        IL.renderConn:Disconnect()
+        IL.renderConn = nil
+    elseif IL.bound then
         pcall(function() RunService:UnbindFromRenderStep("InfinityLineStep") end)
-        IL.bound = false
     end
+    IL.bound = false
     if IL.scrollConn then IL.scrollConn:Disconnect() IL.scrollConn = nil end
     ilRestore()
     IL.grabModel = nil
@@ -16457,6 +16469,10 @@ local function ilStop()
 end
 
 -- Страховка от старого бинда после повторного запуска скрипта
+if IL.renderConn then
+    IL.renderConn:Disconnect()
+    IL.renderConn = nil
+end
 pcall(function() RunService:UnbindFromRenderStep("InfinityLineStep") end)
 IL.bound = false
 
