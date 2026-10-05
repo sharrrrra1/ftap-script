@@ -15994,208 +15994,355 @@ do
     end)()
 
 -- ============================================================
--- INFINITY LINE | Бесконечная линия
+-- INFINITY LINE v8 | ультра-медленные скорости у нуля
+-- ============================================================
+-- ЧТО ИЗМЕНИЛОСЬ ПО СРАВНЕНИЮ С v7:
+--  * Слайдер скорости теперь с шагом 0.01 (x0.01), максимум 10.
+--  * Значения МЕНЬШЕ 1 проходят через квадратичную кривую:
+--    0.5 -> 0.25, 0.1 -> 0.01, 0.01 -> 0.0001 (ещё медленнее).
+--  * 0 по-прежнему = "скрипта нет" (колесо и клавиши не трогают линию).
+--  * Всё остальное из v6/v7 сохранено (анти-тряска, одна точка для
+--    обеих рук, BindToRenderStep после камеры, буст с восстановлением).
+-- Ремуты НЕ стреляют => античит не задет.
 -- ============================================================
 
--- Добавляем настройки в таблицу Settings
-Settings.Misc.infinityLine = false
-Settings.Misc.infinityLineSpeed = 50
+Settings.Grab.InfinityLine            = false
+Settings.Grab.InfinityLineMax         = 500  -- потолок удлинения (студы)
+Settings.Grab.InfinityLineScrollSpeed = 5    -- допускает дробные и 0
+Settings.Grab.InfinityLineSmooth      = 14
 
--- Состояние для Infinity Line
-State.infinityLineTask = nil
-State.infinityLineActive = false
+State.infLine = State.infLine or {
+    current = 0, offset = 0,
+    holdExt = false, holdRet = false,
+    grabModel = nil, primary = nil, secondary = nil,
+    saved = {}, smoothLook = nil,
+    scrollConn = nil, renderConn = nil, renderMode = nil, bound = false,
+}
+local IL = State.infLine
 
--- Секция в MainTab для Infinity Line
-local mainInfinitySec = MainTab:Section({Text = "Infinity Line"})
+-- Насколько можно притянуть объект БЛИЖЕ обычной длины
+local IL_MIN_PULL = -10
 
--- Toggle для включения/выключения
-mainInfinitySec:Toggle({Text = "Infinity Line", Flag = "InfinityLineToggle", Default = false, Callback = function(v)
-    Settings.Misc.infinityLine = v
+local function ilClampReach(v)
+    return math.clamp(v, IL_MIN_PULL, Settings.Grab.InfinityLineMax)
+end
 
-    if v then
-        State.infinityLineActive = true
+-- НОВОЕ (v8): квадратичное замедление значений ниже 1.
+-- 0 остаётся 0 (ванилла), 0.1 становится 0.01 и т.д.
+local function ilEaseSpeed(s)
+    if s <= 0 then return 0 end
+    if s < 1 then return s * s end
+    return s
+end
 
-        -- Запускаем основной цикл в отдельном потоке
-        State.infinityLineTask = task.spawn(function()
-            local GE = ReplicatedStorage:WaitForChild("GrabEvents")
-            local createGL = GE:WaitForChild("CreateGrabLine")
-            local destroyGL = GE:WaitForChild("DestroyGrabLine")
-            local setOwner = GE:WaitForChild("SetNetworkOwner")
-
-            local lineLength = 0
-            local lastFire = 0
-
-            while State.infinityLineActive and Settings.Misc.infinityLine do
-                local char = LocalPlayer.Character
-                if not char then
-                    task.wait(0.3)
-                    continue
-                end
-
-                local hrp = char:FindFirstChild("HumanoidRootPart")
-                if not hrp then
-                    task.wait(0.3)
-                    continue
-                end
-
-                -- Определяем источник линии: захваченный объект или игрок
-                local sourcePart = nil
-                local grabParts = Workspace:FindFirstChild("GrabParts")
-                if grabParts then
-                    for _, gp in ipairs(grabParts:GetChildren()) do
-                        if gp.Name == "GrabPart" then
-                            local weld = gp:FindFirstChildOfClass("WeldConstraint")
-                                or gp:FindFirstChildOfClass("Weld")
-                                or gp:FindFirstChildOfClass("ManualWeld")
-                            if weld then
-                                local p1 = weld.Part1
-                                if p1 and p1 ~= gp then
-                                    sourcePart = p1
-                                    break
-                                end
-                                local p0 = weld.Part0
-                                if p0 and p0 ~= gp then
-                                    sourcePart = p0
-                                    break
-                                end
-                            end
-                        end
-                    end
-                end
-
-                -- Если ничего не захвачено — используем HumanoidRootPart игрока
-                if not sourcePart then
-                    sourcePart = hrp
-                end
-
-                -- Вычисляем направление линии (вперёд от камеры)
-                local cam = Workspace.CurrentCamera
-                local lookVec = cam and cam.CFrame.LookVector or hrp.CFrame.LookVector
-
-                -- Увеличиваем длину линии в зависимости от скорости
-                local speed = Settings.Misc.infinityLineSpeed
-                lineLength = lineLength + speed * 0.05
-
-                -- Позиция конца линии
-                local endPos = sourcePart.Position + lookVec * lineLength
-
-                -- Отправляем CreateGrabLine для визуального эффекта удлинения
-                local now = tick()
-                if now - lastFire >= 0.03 then
-                    lastFire = now
-                    pcall(function()
-                        createGL:FireServer(sourcePart, Vector3.zero, endPos, false)
-                    end)
-                end
-
-                -- Периодически обновляем SetNetworkOwner для удержания контроля
-                if math.floor(lineLength) % 100 < 2 then
-                    pcall(function()
-                        setOwner:FireServer(sourcePart, sourcePart.CFrame)
-                    end)
-                end
-
-                RunService.Heartbeat:Wait()
+-- Сканирование рук: активная рука = та, чей DragAttach используется
+-- констрейнтом GrabPart; обе руки получают ОДНУ мировую точку.
+local function ilScan(model)
+    IL.primary, IL.secondary = nil, nil
+    if not model then return end
+    local gp = model:FindFirstChild("GrabPart")
+    local activePart = nil
+    if gp then
+        for _, c in ipairs(gp:GetChildren()) do
+            if c:IsA("AlignPosition") and c.Attachment1 and c.Attachment1.Parent then
+                activePart = c.Attachment1.Parent
             end
-
-            -- При выключении удаляем линию
-            pcall(function()
-                local char = LocalPlayer.Character
-                if char then
-                    local hrp = char:FindFirstChild("HumanoidRootPart")
-                    if hrp then
-                        destroyGL:FireServer(hrp)
-                    end
+        end
+    end
+    local parts = { model:FindFirstChild("DragPart"), model:FindFirstChild("DragPart1") }
+    local primaryPart = activePart or parts[1] or parts[2]
+    local function grabAttach(dp)
+        if not dp then return nil end
+        for _, ch in ipairs(dp:GetChildren()) do
+            if ch:IsA("Attachment") and ch.Name:sub(1, 10) == "DragAttach" then
+                return ch
+            end
+        end
+        return nil
+    end
+    for _, dp in ipairs(parts) do
+        if dp then
+            local att = grabAttach(dp)
+            if att then
+                if dp == primaryPart then
+                    IL.primary = { part = dp, attach = att }
+                else
+                    IL.secondary = { part = dp, attach = att }
                 end
-                -- Также удаляем линию с захваченного объекта если есть
-                local grabParts = Workspace:FindFirstChild("GrabParts")
-                if grabParts then
-                    for _, gp in ipairs(grabParts:GetChildren()) do
-                        if gp.Name == "GrabPart" then
-                            local weld = gp:FindFirstChildOfClass("WeldConstraint")
-                                or gp:FindFirstChildOfClass("Weld")
-                            if weld then
-                                local target = weld.Part1 or weld.Part0
-                                if target and target ~= gp then
-                                    pcall(function() destroyGL:FireServer(target) end)
-                                end
-                            end
-                        end
-                    end
+            end
+        end
+    end
+    if not IL.primary and IL.secondary then
+        IL.primary, IL.secondary = IL.secondary, nil
+    end
+end
+
+-- Умеренный буст констрейнтов (GrabPart + DragPart): объект быстрее
+-- дотягивается до дальней точки => меньше зазор и маятник.
+-- Оригиналы сохраняются и восстанавливаются.
+local function ilBoost(model)
+    if not model then return end
+    local targets = {}
+    local gp = model:FindFirstChild("GrabPart")
+    if gp then table.insert(targets, gp) end
+    for _, n in ipairs({"DragPart", "DragPart1"}) do
+        local dp = model:FindFirstChild(n)
+        if dp then table.insert(targets, dp) end
+    end
+    for _, obj in ipairs(targets) do
+        local ap = obj:FindFirstChildOfClass("AlignPosition")
+        if ap and not IL.saved[ap] then
+            IL.saved[ap] = { Responsiveness = ap.Responsiveness, MaxVelocity = ap.MaxVelocity }
+            ap.Responsiveness = math.min(math.max(ap.Responsiveness * 1.6, 70), 100)
+            ap.MaxVelocity    = math.max(ap.MaxVelocity, 350)
+        end
+        local ao = obj:FindFirstChildOfClass("AlignOrientation")
+        if ao and not IL.saved[ao] then
+            IL.saved[ao] = { Responsiveness = ao.Responsiveness, MaxAngularVelocity = ao.MaxAngularVelocity }
+            ao.Responsiveness     = math.min(math.max(ao.Responsiveness * 1.4, 60), 100)
+            ao.MaxAngularVelocity = math.max(ao.MaxAngularVelocity, 120)
+        end
+    end
+end
+
+local function ilRestore()
+    for obj, orig in pairs(IL.saved) do
+        if obj and obj.Parent then
+            pcall(function()
+                if orig.Responsiveness     then obj.Responsiveness     = orig.Responsiveness end
+                if orig.MaxVelocity        then obj.MaxVelocity        = orig.MaxVelocity end
+                if orig.MaxAngularVelocity then obj.MaxAngularVelocity = orig.MaxAngularVelocity end
+            end)
+        end
+    end
+    IL.saved = {}
+end
+
+-- Основной шаг: рендер-степ СРАЗУ после камеры (минимальная задержка)
+local function ilStep(dt)
+    if not Settings.Grab.InfinityLine then return end
+    dt = math.clamp(dt or 0.016, 0.0001, 0.1)
+
+    local model = Workspace:FindFirstChild("GrabParts")
+
+    -- Захват появился/исчез/сменился -> сброс и перекэш
+    if model ~= IL.grabModel then
+        ilRestore()
+        IL.grabModel   = model
+        IL.offset      = 0   -- новый захват = обычная длина
+        IL.current     = 0
+        IL.smoothLook  = nil
+        ilScan(model)
+        if model and not IL.primary then
+            task.defer(function()
+                if IL.grabModel == model then
+                    ilScan(model)
+                    ilBoost(model)
                 end
             end)
-
-            State.infinityLineActive = false
-        end)
-    else
-        -- Останавливаем цикл
-        State.infinityLineActive = false
-
-        if State.infinityLineTask then
-            task.cancel(State.infinityLineTask)
-            State.infinityLineTask = nil
+        else
+            ilBoost(model)
         end
-
-        -- Удаляем линию через DestroyGrabLine
-        pcall(function()
-            local GE = ReplicatedStorage:FindFirstChild("GrabEvents")
-            if GE then
-                local destroyGL = GE:FindFirstChild("DestroyGrabLine")
-                if destroyGL then
-                    local char = LocalPlayer.Character
-                    if char then
-                        local hrp = char:FindFirstChild("HumanoidRootPart")
-                        if hrp then
-                            destroyGL:FireServer(hrp)
-                        end
-                    end
-                end
-            end
-        end)
     end
-end})
 
--- Slider для регулировки скорости скролла (удлинения)
-mainInfinitySec:Slider({Text = "Line Speed", Flag = "InfinityLineSpeed", Minimum = 10, Maximum = 300, Default = 50, ValueName = "studs/s", Callback = function(value)
-    Settings.Misc.infinityLineSpeed = value
-end})
+    -- FIX(inf-line): the same GrabParts model may recreate its drag parts/attachments.
+    local stale = not IL.primary
+    if not stale then
+        stale = not IL.primary.part or not IL.primary.part.Parent
+            or not IL.primary.attach or not IL.primary.attach.Parent
+    end
+    if not stale and IL.secondary then
+        stale = not IL.secondary.part or not IL.secondary.part.Parent
+            or not IL.secondary.attach or not IL.secondary.attach.Parent
+    end
+    if stale then
+        ilScan(model)
+        ilBoost(model)
+    end
 
--- Кнопка для мгновенного сброса линии
-mainInfinitySec:Button({Text = "Reset Line", Callback = function()
-    pcall(function()
-        local GE = ReplicatedStorage:FindFirstChild("GrabEvents")
-        if not GE then return end
-        local destroyGL = GE:FindFirstChild("DestroyGrabLine")
-        if not destroyGL then return end
+    if not model or not IL.primary then return end
 
-        local char = LocalPlayer.Character
-        if char then
-            local hrp = char:FindFirstChild("HumanoidRootPart")
-            if hrp then
-                destroyGL:FireServer(hrp)
+    -- Удержание клавиш Extend/Retract (при скорости 0 не работают => ванилла)
+    -- v8: скорость проходит через квадратичное замедление
+    local speed = ilEaseSpeed(Settings.Grab.InfinityLineScrollSpeed)
+    if speed > 0 then
+        local holdRate = speed * 12 * dt
+        if IL.holdExt then IL.offset = IL.offset + holdRate end
+        if IL.holdRet then IL.offset = IL.offset - holdRate end
+        IL.offset = ilClampReach(IL.offset)
+    end
+
+    -- Плавная длина
+    local target = IL.offset
+    local alpha  = 1 - math.exp(-Settings.Grab.InfinityLineSmooth * dt)
+    IL.current   = IL.current + (target - IL.current) * alpha
+    if math.abs(IL.current - target) < 0.01 then IL.current = target end
+
+    -- Нет удлинения => не трогаем штатный захват
+    if IL.current < 0.05 then return end
+    -- Не конфликтуем с Inf Zoom
+    if Settings.Grab.InfZoom then return end
+
+    local cam  = Workspace.CurrentCamera
+    local look = cam.CFrame.LookVector
+
+    -- === АНТИ-ТРЯСКА: сглаживание направления ===
+    local myRoot  = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    local mySpeed = myRoot and myRoot.AssemblyLinearVelocity.Magnitude or 0
+    local dirRate = math.clamp(22 / (1 + IL.current * 0.06), 6, 22)
+    if mySpeed > 60 then dirRate = dirRate * 0.45 end
+    if not IL.smoothLook then IL.smoothLook = look end
+    local aLook = 1 - math.exp(-dirRate * dt)
+    IL.smoothLook = IL.smoothLook + (look - IL.smoothLook) * aLook
+    IL.smoothLook = (IL.smoothLook.Magnitude > 0.001) and IL.smoothLook.Unit or look
+
+    -- === ОДНА мировая точка для обеих рук => вторая линия не отрывается ===
+    local part = IL.primary.part
+    if part.Parent and IL.primary.attach.Parent then
+        local worldPoint = part.Position + IL.smoothLook * IL.current
+        IL.primary.attach.Position = part.CFrame:PointToObjectSpace(worldPoint)
+        if IL.secondary and IL.secondary.part.Parent and IL.secondary.attach.Parent then
+            IL.secondary.attach.Position = IL.secondary.part.CFrame:PointToObjectSpace(worldPoint)
+        end
+    end
+end
+
+local function ilStart()
+    if IL.bound or IL.renderConn or IL.renderMode then return end
+
+    local bound = false
+    if type(RunService.BindToRenderStep) == "function" then
+        local ok = pcall(function()
+            RunService:BindToRenderStep("InfinityLineStep", Enum.RenderPriority.Camera.Value + 1, ilStep)
+        end)
+        if ok then
+            bound = true
+            IL.renderMode = "bind"
+            IL.bound = true
+            IL.renderConn = nil
+            if not IL._backendLogged then
+                IL._backendLogged = true
+                warn("[InfinityLine] render backend: BindToRenderStep")
+            end
+        else
+            if type(RunService.UnbindFromRenderStep) == "function" then
+                pcall(function() RunService:UnbindFromRenderStep("InfinityLineStep") end)
             end
         end
+    end
 
-        local grabParts = Workspace:FindFirstChild("GrabParts")
-        if grabParts then
-            for _, gp in ipairs(grabParts:GetChildren()) do
-                if gp.Name == "GrabPart" then
-                    local weld = gp:FindFirstChildOfClass("WeldConstraint")
-                        or gp:FindFirstChildOfClass("Weld")
-                    if weld then
-                        local target = weld.Part1 or weld.Part0
-                        if target and target ~= gp then
-                            pcall(function() destroyGL:FireServer(target) end)
-                        end
-                    end
-                end
+    if not bound then
+        local conn = nil
+        local ok = pcall(function()
+            conn = RunService.RenderStepped:Connect(ilStep)
+        end)
+        if ok and conn then
+            IL.renderMode = "signal"
+            IL.bound = true
+            IL.renderConn = conn
+            if not IL._backendLogged then
+                IL._backendLogged = true
+                warn("[InfinityLine] render backend: RenderStepped")
             end
+        else
+            IL.renderMode = nil
+            IL.bound = false
+            IL.renderConn = nil
+            return
         end
+    end
+
+    -- Скролл работает ТОЛЬКО во время захвата и ТОЛЬКО при скорости > 0
+    if IL.scrollConn and type(IL.scrollConn.Disconnect) == "function" then
+        pcall(function() IL.scrollConn:Disconnect() end)
+        IL.scrollConn = nil
+    end
+    local okScroll, sConn = pcall(function()
+        return UserInputService.InputChanged:Connect(function(input)
+            if not Settings.Grab.InfinityLine then return end
+            if input.UserInputType ~= Enum.UserInputType.MouseWheel then return end
+            local speed = ilEaseSpeed(Settings.Grab.InfinityLineScrollSpeed)
+            if speed <= 0 then return end -- 0 = "скрипта нет", колесо не трогает линию
+            if not Workspace:FindFirstChild("GrabParts") then return end
+            IL.offset = IL.offset + input.Position.Z * speed
+        end)
     end)
+    if okScroll and sConn then
+        IL.scrollConn = sConn
+    end
+end
+
+local function ilStop()
+    if IL.renderMode == "bind" then
+        if type(RunService.UnbindFromRenderStep) == "function" then
+            pcall(function() RunService:UnbindFromRenderStep("InfinityLineStep") end)
+        end
+    elseif IL.renderMode == "signal" or IL.renderConn then
+        local conn = IL.renderConn
+        if conn and type(conn.Disconnect) == "function" then
+            pcall(function() conn:Disconnect() end)
+        end
+    end
+    IL.renderMode = nil
+    IL.renderConn = nil
+    IL.bound = false
+
+    if IL.scrollConn and type(IL.scrollConn.Disconnect) == "function" then
+        pcall(function() IL.scrollConn:Disconnect() end)
+        IL.scrollConn = nil
+    end
+    ilRestore()
+    IL.grabModel = nil
+    IL.primary, IL.secondary = nil, nil
+    IL.offset, IL.current = 0, 0
+    IL.smoothLook = nil
+    IL.holdExt, IL.holdRet = false, false
+end
+
+-- Страховка от старых соединений после повторного запуска скрипта
+if IL.renderConn and type(IL.renderConn.Disconnect) == "function" then
+    pcall(function() IL.renderConn:Disconnect() end)
+    IL.renderConn = nil
+end
+if IL.scrollConn and type(IL.scrollConn.Disconnect) == "function" then
+    pcall(function() IL.scrollConn:Disconnect() end)
+    IL.scrollConn = nil
+end
+if IL.renderMode == "bind" and type(RunService.UnbindFromRenderStep) == "function" then
+    pcall(function() RunService:UnbindFromRenderStep("InfinityLineStep") end)
+end
+IL.renderMode = nil
+IL.bound = false
+
+-- ============================ UI ============================
+local infLineSec = GrabTab:Section({Text = "Infinity Line"})
+
+infLineSec:Toggle({Text = "Infinity Line", Flag = "InfLineToggle", Default = false, Callback = function(v)
+    Settings.Grab.InfinityLine = v
+    if v then ilStart() else ilStop() end
 end})
 
--- ============================================================
--- КОНЕЦ БЛОКА INFINITY LINE
--- ============================================================
+infLineSec:Slider({Text = "Max Reach (Cap)", Flag = "InfLineMax", Minimum = 50, Maximum = 1000, Default = 500, ValueName = "studs", Callback = function(v)
+    Settings.Grab.InfinityLineMax = v
+    IL.offset = ilClampReach(IL.offset)
+end})
 
-warn("EndorisFTAP Reborn loaded successfully!")
+-- v8: шаг 0.01 (x0.01). 0 = ванилла; значения ниже 1 дополнительно
+-- замедлены квадратичной кривой (0.1 на слайдере => 0.01 реальной скорости).
+infLineSec:Slider({Text = "Scroll Speed (x0.01)", Flag = "InfLineScrollSpeed", Minimum = 0, Maximum = 1000, Default = 500, ValueName = "", Callback = function(v)
+    Settings.Grab.InfinityLineScrollSpeed = v / 100
+end})
+
+infLineSec:Slider({Text = "Smoothness", Flag = "InfLineSmooth", Minimum = 2, Maximum = 30, Default = 14, ValueName = "lerp", Callback = function(v)
+    Settings.Grab.InfinityLineSmooth = v
+end})
+
+infLineSec:Keybind({Text = "Extend (Hold)", Flag = "InfLineExtendKey", Mode = "Hold", Callback = function(held)
+    IL.holdExt = held
+end})
+
+infLineSec:Keybind({Text = "Retract (Hold)", Flag = "InfLineRetractKey", Mode = "Hold", Callback = function(held)
+    IL.holdRet = held
+end})
+
+warn("EndorisFTAP Reborn loaded successfully! [PERF PASS 02.10.2026]")
