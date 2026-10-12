@@ -1,12 +1,6 @@
-local _getgenv = getgenv or getfenv
-getgenv = _getgenv
-local _env = _getgenv()
 
-_env.LPH_NO_VIRTUALIZE = _env.LPH_NO_VIRTUALIZE or function(f)
-    return f
-end
 
-if true then
+
 	local lib, v16, fn10, Players, ReplicatedStorage_, RunService, UserInputService_, Workspace, Lighting, HttpService
 	local TeleportService, SoundService, CoreGui, localPlayer, fn11, fn12, fn13, fn14, fn15, str5
 	local fn16, fn17, fn18, fn19, fn20, fn21, fn22, fn23, flag6, flag7
@@ -223,7 +217,6 @@ NeverLose.Scales = {
 NeverLose.IconColor = Color3.fromRGB(255, 255, 255);
 NeverLose.ScreenGui = GlobalWindow;
 NeverLose.Flags = {};
-NeverLose.FlagTypes = {};
 NeverLose.AccentColor = Color3.fromRGB(96, 76, 214);
 NeverLose.MainColor = Color3.fromRGB(8, 8, 13);
 NeverLose.RegisiteryColor = {};
@@ -1867,7 +1860,6 @@ function NeverLose:RegisiterHandler(Handler: Frame , Signal)
 
 		if Config.Flag then
 			NeverLose.Flags[Config.Flag] = ToggleLib;
-			NeverLose.FlagTypes[Config.Flag] = "toggle";
 		end;
 
 		return ToggleLib;
@@ -5585,28 +5577,31 @@ function NeverLose:CreateWindow(Config)
 
 		function ConfigLib:GetData(performance)
 			local ikc = {};
+			
 			local cd = 0;
+			for Flag,v in next , NeverLose.Flags do
+				if v and v.GetValue then
+					local data = v:GetValue();
 
-			-- Keep the entire UI/features in the script. For configs, only
-			-- remember toggles that were ON when the config was saved.
-			for Flag,v in next, NeverLose.Flags do
-				if NeverLose.FlagTypes[Flag] == "toggle" and v and v.GetValue then
-					local ok, data = pcall(function()
-						return v:GetValue();
-					end);
-
-					if ok and data == true then
+					if typeof(data) == 'Color3' then
 						table.insert(ikc,{
 							Idx = Flag,
-							Value = true
+							Value = data:ToHex(),
+						});
+					else
+						table.insert(ikc,{
+							Idx = Flag,
+							Value = data
 						});
 					end;
 				end;
-
-				if performance and cd % 35 == 1 then
-					task.wait();
+				
+				if performance then
+					if cd % 35 == 1 then
+						task.wait()
+					end
 				end;
-
+				
 				cd += 1;
 			end;
 
@@ -5615,41 +5610,18 @@ function NeverLose:CreateWindow(Config)
 
 		function ConfigLib:LoadData(data)
 			local coded = HttpService:JSONDecode(Encryption.reverse(NeverLose.Base64Decode(data)));
-			local saved = {};
 
-			for _,v in next, coded do
-				if v and v.Idx and v.Value == true then
-					saved[v.Idx] = true;
-				end;
-			end;
-
-			-- Restore feature state only. Do not replay sliders/keybinds/colors/
-			-- dropdowns/text inputs as executable state.
-			for Flag,flag in next, NeverLose.Flags do
-				if NeverLose.FlagTypes[Flag] == "toggle" and flag and flag.GetValue and flag.SetValue then
-					local ok,current = pcall(function()
-						return flag:GetValue();
-					end);
-
-					if ok and current == true and not saved[Flag] then
-						pcall(function()
-							flag:SetValue(false);
-						end);
-					end;
-				end;
-			end;
-
-			for Flag in next, saved do
-				if NeverLose.FlagTypes[Flag] == "toggle" then
-					local flag = NeverLose.Flags[Flag];
-					if flag and flag.SetValue then
-						pcall(function()
-							flag:SetValue(true);
-						end);
+			for i,v in next , coded do
+				if v.Idx then
+					if NeverLose.Flags[v.Idx] then
+						task.spawn(function()
+							NeverLose.Flags[v.Idx]:SetValue(v.Value)
+						end)
 					end;
 				end;
 			end;
 		end;
+
 		function ConfigLib:RefreshConfig()
 			if not isfolder(Window.ConfigFolder) then
 				makefolder(Window.ConfigFolder);
@@ -33420,20 +33392,52 @@ end)
 					local tbl13 = {}
 
 					pcall(function()
+						local v53 = pairs
 						local flags = lib.Flags or {}
-						local flagTypes = NeverLose.FlagTypes or {}
 
-						-- Save only feature toggles that are ON.
-						for k, flag15 in pairs(flags) do
-							if k ~= "TargetPlayer" and k ~= "CfgPick" and k ~= "CfgName"
-								and flagTypes[k] == "toggle" then
-
+						for k, flag15 in v53(flags) do
+							if k ~= "TargetPlayer" and k ~= "CfgPick" and k ~= "CfgName" then
 								local ok, result = pcall(function()
 									return flag15:GetValue()
 								end)
 
-								if ok and result == true then
-									tbl13[k] = true
+								if ok then
+									local kind = typeof(result)
+
+									if kind == "boolean" or kind == "number" or kind == "string" then
+										tbl13[k] = result
+									elseif kind == "Color3" then
+										local v54 = tbl13
+										local tbl14 = { __c3 = true }
+										local n32 = math.floor(result.R * 255)
+										local n33 = math.floor(result.G * 255)
+										local floor = math.floor
+										local n34 = result.B * 255
+										tbl14[1] = n32
+										tbl14[2] = n33
+
+										do
+											local values = table.pack(floor(n34))
+											table.move(values, 1, values.n, 3, tbl14)
+										end
+
+										v54[k] = tbl14
+									elseif kind == "EnumItem" then
+										tbl13[k] = { __enum = true, tostring(result) }
+									elseif kind == "table" then
+										local tbl14 = {}
+
+										for k2, v54 in pairs(result) do
+											local kind2 = typeof(k2)
+											local kind3 = typeof(v54)
+
+											if (kind2 == "string" or kind2 == "number") and (kind3 == "boolean" or kind3 == "number" or kind3 == "string") then
+												tbl14[tostring(k2)] = v54
+											end
+										end
+
+										tbl13[k] = tbl14
+									end
 								end
 							end
 						end
@@ -33441,6 +33445,7 @@ end)
 
 					return tbl13
 				end
+
 				local function fn64(arg)
 					if arg ~= "config" then
 						return
@@ -33473,37 +33478,25 @@ end)
 						return
 					end
 
-					local flags = lib.Flags or {}
-					local flagTypes = NeverLose.FlagTypes or {}
+					for k, v53 in pairs(arg) do
+						if k ~= "TargetPlayer" then
+							local flags = lib.Flags and lib.Flags[k]
 
-					-- Turn off currently active features that were NOT active
-					-- when this config was saved.
-					for k, flag in pairs(flags) do
-						if flagTypes[k] == "toggle" and flag and flag.GetValue and flag.SetValue then
-							local ok, current = pcall(function()
-								return flag:GetValue()
-							end)
-
-							if ok and current == true and arg[k] ~= true then
+							if flags and flags.SetValue then
 								pcall(function()
-									flag:SetValue(false)
-								end)
-							end
-						end
-					end
-
-					-- Turn on only the feature toggles present in the saved config.
-					for k, value in pairs(arg) do
-						if flagTypes[k] == "toggle" and value == true then
-							local flag = flags[k]
-							if flag and flag.SetValue then
-								pcall(function()
-									flag:SetValue(true)
+									if type(v53) == "table" and v53.__c3 then
+										flags:SetValue(Color3.fromRGB(v53[1] or 0, v53[2] or 0, v53[3] or 0))
+									elseif type(v53) == "table" and v53.__enum then
+										flags:SetValue(v53[1])
+									else
+										flags:SetValue(v53)
+									end
 								end)
 							end
 						end
 					end
 				end
+
 				local function fn66(arg)
 					if arg ~= "config" then
 						return
@@ -34621,5 +34614,4 @@ end)
 			end
 		end)
 	end)
-
 end
