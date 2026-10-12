@@ -1,8 +1,3 @@
--- Wraith clean build v3
--- Authentication / key / executor-lock bootstrap removed.
--- Terminal anti-tamper guard removed.
--- Working code is copied from the original without re-indenting or restructuring it.
-
 local _getgenv = getgenv or getfenv
 getgenv = _getgenv
 local _env = _getgenv()
