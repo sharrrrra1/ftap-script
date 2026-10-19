@@ -21281,6 +21281,9 @@ end
 						end
 
 						tbl12.UpdateLookFigures = function(arg)
+							if tbl8.GucciAntiGrab then
+								return
+							end
 							if flag11 or not lookFigures.Enabled then
 								return
 							end
@@ -23436,6 +23439,14 @@ end
 							if not tbl8.GucciAntiGrab then
 								fn23()
 								return
+							end
+
+							if tbl7.LookFigures and tbl7.LookFigures.Enabled then
+								tbl12.SetLookFigures(false)
+							end
+							local lookFiguresToggle = toggles and toggles.LookFigures
+							if lookFiguresToggle and type(lookFiguresToggle.SetValue) == "function" then
+								lookFiguresToggle:SetValue(false)
 							end
 
 							if flag12 then
